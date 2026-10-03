@@ -79,7 +79,7 @@ world-space rigid body, rather than facing or animation. At entry it transfers h
 and bodies, preserving relative limb motion and native vertical/angular velocities. Constraints and
 recovery remain native. Gameplay requests expire after 500ms; captured velocity has a separate
 1.5-second limit and is discarded after entry, cancellation or an ownership change.
-All four Slam test suites pass. Forward riding, fakie and running off board passed the live playtest:
+All five Slam test suites pass. Forward riding, fakie and running off board passed the live playtest:
 bails start promptly and carry the existing direction of travel.
 Additional airborne steering and ragdoll controls are still unfinished.
 The HUD scores distinct impacts, fall distance, airtime and sliding. A skinned 3D X-ray mesh reuses the
@@ -89,12 +89,29 @@ bruises and red for fractures. Each region awards its
 fracture bonus once per attempt. These are arcade injury scores; the mode does not alter the game's
 ragdoll or damage the skater's bones.
 
-After the round, recover and mount your board, then choose **Retry from here**. **Stop attempt** cancels
-the round; **Dismiss HUD** hides it. Console equivalents are `slam start`, `slam retry`, `slam bail`, `slam stop`,
+Choose **Free slam**, **Score target**, **Impact chain**, **Fracture target**, **Big drop**, **Hang time**
+or **Long slide** under **Skater → SLAM → CHOOSE A CHALLENGE**. Set a target or expand **Scoring rules**
+to change impact and fracture rewards, fall/airtime/slide rates, chain bonus/window and fracture thresholds.
+Settings save automatically and apply to the next attempt; an active attempt retains its original rules.
+The HUD shows target progress and the current and best impact chain. Completed results show all six
+score components, measured distances/times and injuries in each body region. Personal bests and completed
+attempt counts are saved separately for each map, challenge, target and scoring rule set. Canceled attempts
+do not record a score or personal best. A missed target still records the completed score.
+
+After the round, recover, then choose **Retry from saved start** to return to the original attempt's
+location and orientation, keeping its challenge and scoring rules. The next attempt begins after the
+native teleport finishes and two distinct fresh physics samples confirm that pose. **Start new attempt here**
+instead captures your current location and selected settings. **Cancel retry** stops waiting; a native teleport
+already dispatched remains under the game's control. Retry waits at most five seconds for a busy teleport
+manager and ten seconds for arrival. Loading, map/owner changes, another teleport and mode conflicts stop it.
+The saved start lasts for this skater and map in the current session. **Cancel attempt** discards
+the round; **Exit Slam** or **Dismiss results** hides its HUD. Console equivalents are `slam start`, `slam retry`, `slam bail`, `slam stop`,
 `slam dismiss` and `slam status`.
 
 The prototype requires offline play with No Bail, Noclip and the Park Editor off. Respawns, map changes,
-teleports or lost physics telemetry cancel an active attempt. Retry begins at your current position.
+teleports or lost physics telemetry cancel an active attempt. First person also blocks saved-start retry.
+The challenge picker, target HUD, completed results and persisted personal bests passed a live playtest.
+The new saved-start native return is implemented and covered by lifecycle tests; live validation is pending.
 The X-ray mesh loads once in the background when an attempt or normal-play X-ray first opens. It reads
 the player animation and native skinning buffers, including hands and corrective bones, and uses a
 separate depth buffer for the skeleton's own surfaces. On the supported build, it captures the native
@@ -257,7 +274,7 @@ The Slam suites also check impact timing, saved visual options and temporary spe
 
 ```powershell
 cmake --preset vs2022-x64 -DDINGOSDK_BUILD_SLAM_TESTS=ON
-cmake --build --preset release --target dingosdk_slam_tests dingosdk_slam_visuals_tests dingosdk_slam_settings_tests --parallel 4
+cmake --build --preset release --target dingosdk_slam_tests dingosdk_slam_visuals_tests dingosdk_slam_settings_tests dingosdk_slam_bail_tests dingosdk_slam_retry_tests --parallel 4
 ctest --test-dir build/vs2022-x64 -C Release --output-on-failure -R "^slam_"
 ```
 

@@ -10,7 +10,7 @@
 #include <string_view>
 
 namespace dingosdk::slam {
-enum class Action { start, stop, dismiss, bail };
+enum class Action { start, retry, stop, dismiss, bail };
 struct Joint { Vec3 position{}; Region region = Region::torso; int parent = -1; };
 struct Snapshot {
     Result result;
@@ -29,6 +29,8 @@ struct Snapshot {
     PersonalBest selected_best, result_best;
     std::string challenge_save_status, best_save_status;
     bool challenge_options_ready{}, result_best_ready{}, new_best{};
+    bool saved_start{},retry_available{},retry_active{};
+    std::string retry_status;
     VisualEvents visual_events;
     VisualEvents normal_xray_events;
     std::string visual_save_status;

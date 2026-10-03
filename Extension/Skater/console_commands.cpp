@@ -18,9 +18,10 @@ void register_movement_commands(Commands &registry) {
                 value.availability, value.samples, value.dropped, value.contacts, value.physics_state));
             out(std::format("{} Manual bails queued: {}, selected: {}, animation published: {}.",
                 value.bail_status,value.manual_bails_queued,value.manual_bails_selected,value.manual_bails_published));
+            out(value.retry_status);
         } else {
             const auto request = operation == "stop" ? slam::Action::stop : operation == "dismiss" ? slam::Action::dismiss :
-                operation=="bail" ? slam::Action::bail : slam::Action::start;
+                operation=="bail" ? slam::Action::bail : operation=="retry" ? slam::Action::retry : slam::Action::start;
             out(slam::request(request) ? "Slam control queued." : "A Slam control is already queued.");
         }
     };

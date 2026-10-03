@@ -152,28 +152,7 @@ void skater_page(SkateMenu& menu, const Model& model, const CallbacksV3& callbac
     else if (menu.skater_tab == 1) movement_controls(menu, model, callbacks);
     else {
         const auto value = dingosdk::slam::snapshot();
-        begin_card(menu, "slam-challenge", "SLAM CHALLENGE", "Offline prototype");
-        note("Start an attempt, then take a fall. Impacts, fractures, fall height, airtime and sliding add to your score.");
-        ImGui::Text("%s  |  %llu points", dingosdk::slam::phase_name(value.result.phase),
-            static_cast<unsigned long long>(value.result.points));
-        note(value.result.detail.c_str());
-        if (!value.available || value.bailed) warn(value.availability.c_str());
-        ImGui::BeginDisabled(!value.available || value.bailed);
-        if (ImGui::Button(value.result.phase == dingosdk::slam::Phase::ready ? "Start attempt" : "Retry from here", ImVec2(-FLT_MIN, 0)))
-            (void)dingosdk::slam::request(dingosdk::slam::Action::start);
-        ImGui::EndDisabled();
-        ImGui::BeginDisabled(!value.bail_available);
-        if (ImGui::Button("Bail now",ImVec2(-FLT_MIN,0))) (void)dingosdk::slam::request(dingosdk::slam::Action::bail);
-        ImGui::EndDisabled();
-        note(value.bail_status.c_str());
-        if (value.result.phase == dingosdk::slam::Phase::attempt || value.result.phase == dingosdk::slam::Phase::bailed ||
-            value.result.phase == dingosdk::slam::Phase::settled) {
-            if (ImGui::Button("Stop attempt", ImVec2(-FLT_MIN, 0))) (void)dingosdk::slam::request(dingosdk::slam::Action::stop);
-        }
-        if (value.visible && ImGui::Button("Dismiss HUD", ImVec2(-FLT_MIN, 0))) (void)dingosdk::slam::request(dingosdk::slam::Action::dismiss);
-        note("Recover and get back on your board before retrying. Dem Bones supplies the 3D X-ray skeleton and injury highlights.");
-        note(value.mesh_status.c_str());
-        end_card();
+        slam_challenge_cards(menu,value);
         begin_card(menu,"slam-controls","BAIL CONTROLS");
         auto controls=value.bail_controls;
         bool controls_changed=false;
@@ -233,7 +212,7 @@ void skater_page(SkateMenu& menu, const Model& model, const CallbacksV3& callbac
         if (value.bail_key_conflict) warn("Bail key overlaps your menu or console key; choose another key.");
         if (value.bail_controller_conflict) warn("Bail combo overlaps Noclip or a velocity boost and is disabled; choose a different combo.");
         note("F8 is the default. Controller is unbound until recorded. Hold does not repeat; release after menus or recovery before pressing again.");
-        note("Use while riding or airborne. No Bail, Noclip, Park Editor, First person and online play block manual bails.");
+        note("Use while riding, walking, running or airborne. No Bail, Noclip, Park Editor, First person and online play block manual bails.");
         if (!value.bail_controls_save_status.empty()) note(value.bail_controls_save_status.c_str());
         end_card();
         begin_card(menu,"slam-xray","X-RAY");
@@ -295,7 +274,7 @@ void skater_page(SkateMenu& menu, const Model& model, const CallbacksV3& callbac
         if (changed) (void)dingosdk::slam::set_visual_options(visuals);
         if (visuals.normal_play) note("Normal-play X-ray follows every fall and clears injury highlights after recovery. No attempt or reset is needed.");
         if (value.first_person) note("The skeleton is hidden while First person is enabled.");
-        note("Blue: uninjured. Orange: bruised. Red: fractured. X-ray settings are saved automatically.");
+        note("Ivory bones with blue uninjured patches, orange bruises and red fractures. X-ray settings are saved automatically.");
         if (!value.visual_save_status.empty()) note(value.visual_save_status.c_str());
         if (visuals.impact_sound && !value.impact_audio_status.empty()) note(value.impact_audio_status.c_str());
         if (visuals.reduced_effects) note("Reduced effects suppresses bright pulses, camera impacts and automatic slow motion.");

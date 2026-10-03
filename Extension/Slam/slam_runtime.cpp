@@ -3,6 +3,7 @@
 #include "slam_pose.h"
 #include "slam_pose_publication.h"
 #include "slam_audio.h"
+#include "slam_retry.h"
 #include "Extension/Multiplayer/Remote/native_pose_layout.h"
 #include "Extension/Multiplayer/Remote/native_skater.h"
 #include "Extension/Skater/no_bail.h"
@@ -43,6 +44,8 @@ struct State {
     Watch watch;
     PosePublication pose_publication;
     Challenge challenge;
+    SavedStartRetry retry;
+    std::atomic<std::uint64_t> level_generation{1};
     FreeplayXray normal_xray;
     Snapshot published;
     Frame last;
@@ -50,7 +53,7 @@ struct State {
     std::uint64_t last_at{};
     bool bail_latched{}, contracts_checked{}, contracts_ok{};
     bool pose_hooks_checked{}, pose_hooks_ok{};
-    std::string map, diagnostic, pose_diagnostic;
+    std::string map, diagnostic, pose_diagnostic,retry_diagnostic;
     std::future<std::shared_ptr<const SkeletonMesh>> mesh_load;
     bool mesh_started{};
     bool normal_play_observed{};
@@ -866,27 +869,78 @@ void tick(std::uintptr_t base, std::uintptr_t client, std::uintptr_t entity, boo
         if (s.pending) {
             const auto action = *s.pending;
             s.pending.reset();
-            if (action == Action::dismiss) { s.challenge.cancel("Attempt dismissed."); s.published.visible = false; cancel_manual_bail(); }
-            else if (action == Action::stop) {s.challenge.cancel("Attempt stopped."); cancel_manual_bail();}
+            if (action == Action::dismiss) { s.challenge.cancel("Attempt dismissed."); s.retry.cancel(); s.published.visible = false; cancel_manual_bail(); }
+            else if (action == Action::stop) {s.challenge.cancel("Attempt stopped."); s.retry.cancel(); cancel_manual_bail();}
             else if (action == Action::bail) explicit_bail=true;
+            else if (action == Action::retry) {
+                // Queued here, dispatched below with no Slam mutex held.
+                RetryObservation frame;
+                frame.owner=owner; frame.client=client; frame.entity=entity; frame.world=pointer(client+8); frame.map=map;
+                frame.generation=s.level_generation.load(); frame.now=GetTickCount64();
+                frame.allowed=!issue && !first_person && !s.effects_suspended.load();
+                frame.owned=owned; frame.fresh=s.published.available; frame.bailed=s.last.bailed;
+                if (!s.challenge.running() && s.retry.begin(frame)) {
+                    s.published.visible=true; cancel_manual_bail();
+                    s.published.visual_events.reset(); s.normal_xray.reset();
+                } else s.published.availability="Recover before retrying; the saved start must belong to this skater and map.";
+            }
             else {
                 s.published.visible = true;
-                if (s.published.available && s.published.challenge_options_ready &&
+                if (!s.challenge.running() && !s.retry.active() && s.published.available && s.published.challenge_options_ready &&
                     !map.empty() && map.size()<=512 && map.find('\0')==std::string_view::npos &&
                     s.challenge.begin(s.last,s.published.selected_config)) {
                     ++s.attempt_serial; s.attempt_map=map;
                     s.published.result_best_ready=false; s.published.new_best=false;
                     s.published.xray_context_valid=true;
                     s.published.visual_events.reset();
+                    PoseMatrix start{};
+                    s.retry.invalidate("Starting transform could not be saved; start a new attempt here.");
+                    if (read_actor_world(owner,start)) {
+                        // Entity transform's SIMD metadata lanes are not
+                        // position/orientation; native teleport needs affine W.
+                        start[3]=start[7]=start[11]=0; start[15]=1;
+                        (void)s.retry.save({owner,client,s.level_generation.load(),std::string(map),start,s.published.selected_config});
+                    }
                     logging::log(logging::Level::info, logging::Channel::skater,"Slam attempt {} started: {}, target {:.2f} {}.",
                         s.attempt_serial,challenge_name(s.published.selected_config.kind),s.published.selected_config.target,
                         challenge_unit(s.published.selected_config.kind));
                 } else {
                     s.published.availability = s.last.bailed ? "Recover and get back on your board before retrying." :
-                        issue ? issue : "Waiting for a fresh physics sample.";
+                        s.challenge.running() ? "Cancel the current attempt before starting another." :
+                        s.retry.active() ? "Wait for the saved-start retry or cancel it." : issue ? issue : "Waiting for a fresh physics sample.";
                 }
             }
         }
+        RetryObservation retry_frame;
+        retry_frame.owner=owner; retry_frame.client=client; retry_frame.entity=entity; retry_frame.world=pointer(client+8); retry_frame.map=map;
+        retry_frame.generation=s.level_generation.load(); retry_frame.now=GetTickCount64(); retry_frame.sample_at=s.last_at;
+        // Ownership can be temporarily unavailable during our native teleport.
+        // Only the submitted retry may wait through that gap; it cannot dispatch.
+        retry_frame.allowed=offline && !no_bail && !noclip && !editor && !first_person && !s.effects_suspended.load();
+        retry_frame.owned=owned; retry_frame.fresh=s.published.available; retry_frame.bailed=s.last.bailed;
+        retry_frame.pose_valid=owned && read_actor_world(owner,retry_frame.transform);
+        if (retry_frame.pose_valid) {retry_frame.transform[3]=retry_frame.transform[7]=retry_frame.transform[11]=0; retry_frame.transform[15]=1;}
+        if (s.retry.saved() && !s.retry.retains_start(retry_frame))
+            s.retry.invalidate("Saved start cleared: the skater or map changed.");
+        const auto retry_step=s.retry.step(retry_frame,s.retry.returning() ? inspect_skater_teleport(s.retry.receipt()) : SkaterTeleportState::busy);
+        std::optional<SavedStart> retry_dispatch;
+        if (retry_step==RetryStep::dispatch) retry_dispatch=s.retry.saved();
+        if (retry_step==RetryStep::arrived && s.retry.saved()) {
+            const auto& start=*s.retry.saved();
+            if (s.challenge.begin(s.last,start.config)) {
+                ++s.attempt_serial; s.attempt_map=map;
+                s.published.result_best_ready=false; s.published.new_best=false;
+                s.published.xray_context_valid=true; s.published.visual_events.reset();
+                logging::log(logging::Level::info,logging::Channel::skater,
+                    "Slam retry arrived and attempt {} started: {}, actor {:.3f}, {:.3f}, {:.3f}, forward {:.3f}, {:.3f}, {:.3f}.",
+                    s.attempt_serial,challenge_name(start.config.kind),retry_frame.transform[12],retry_frame.transform[13],retry_frame.transform[14],
+                    retry_frame.transform[8],retry_frame.transform[9],retry_frame.transform[10]);
+            } else s.retry.cancel("Returned to the start, but the attempt could not begin. Try again after recovery.");
+        }
+        s.published.saved_start=s.retry.saved().has_value();
+        s.published.retry_active=s.retry.active();
+        s.published.retry_available=!s.challenge.running() && s.retry.available(retry_frame);
+        s.published.retry_status=s.retry.status();
         const auto& controls=s.published.bail_controls;
         const auto keys=launcher::overlay_keys();
         s.published.bail_key_conflict=controls.key && (controls.key==keys.menu || controls.key==keys.console);
@@ -896,7 +950,8 @@ void tick(std::uintptr_t base, std::uintptr_t client, std::uintptr_t entity, boo
             overlapping_combos(controls.controller_combo,bindings.up_velocity_combo);
         const bool bail_mode=s.published.bail_controls_ready && controls.enabled &&
             (s.challenge.running() || s.published.visuals.normal_play);
-        const char* bail_issue=!bail_mode ? "Start an attempt or enable normal-play X-ray and Manual bail." :
+        const char* bail_issue=s.retry.active() ? "Wait for retry to return to the saved start." :
+            !bail_mode ? "Start an attempt or enable normal-play X-ray and Manual bail." :
             issue ? issue : changed ? "Waiting for the current skater and map." :
             first_person ? "Turn off First person before using Manual bail." :
             s.effects_suspended.load(std::memory_order_acquire) ? "Waiting for loading to finish." :
@@ -967,6 +1022,7 @@ void tick(std::uintptr_t base, std::uintptr_t client, std::uintptr_t entity, boo
         const auto effects_options=s.published.visuals;
         const auto effects_events=effects_options.normal_play ? s.published.normal_xray_events : s.published.visual_events;
         const bool effects_allowed=!visual_issue && !s.effects_suspended.load(std::memory_order_acquire) &&
+            !s.retry.active() &&
             !s.effects_cancel_requested.exchange(false,std::memory_order_acq_rel) && GetTickCount64()-s.last_at<250 &&
             (effects_options.normal_play || (s.published.visible && s.published.xray_context_valid));
         const bool camera_allowed=effects_allowed && !first_person && gameplay_focused();
@@ -976,9 +1032,22 @@ void tick(std::uintptr_t base, std::uintptr_t client, std::uintptr_t entity, boo
         // Native setting listeners can call back into game systems. Invoke
         // them with no Slam mutex held; presentation only reads the result.
         lock.unlock();
+        SkaterTeleportSubmission retry_submission;
+        if (retry_dispatch && retry_dispatch->generation==s.level_generation.load() && ready && offline &&
+            !no_bail && !noclip && !editor && !first_person && !s.effects_suspended.load())
+            retry_submission=submit_owned_skater_teleport(client,retry_dispatch->owner,retry_dispatch->transform);
         const auto pulse=update_time_effect(effects_options,effects_events,effects_allowed && !first_person && gameplay_focused());
         const auto audio_status=update_impact_audio(effects_options,effects_events,effects_allowed);
         lock.lock();
+        if (retry_dispatch && s.retry.active() && retry_dispatch->generation==s.level_generation.load()) {
+            if (retry_submission.state==SkaterTeleportState::submitted) {
+                s.retry.submitted(retry_submission.receipt,GetTickCount64());
+                // Fresh samples must come from after the native handoff.
+                s.last.valid=false; s.published.available=false;
+            } else if (retry_submission.state==SkaterTeleportState::unavailable)
+                s.retry.cancel("Saved-start teleport is unavailable for this skater. Recover and try again.");
+            s.published.retry_active=s.retry.active(); s.published.retry_status=s.retry.status();
+        }
         s.published.impact_audio_status=audio_status;
         s.published.slow_motion_active=pulse.active;
         s.published.slow_motion_factor=pulse.factor;
@@ -987,6 +1056,12 @@ void tick(std::uintptr_t base, std::uintptr_t client, std::uintptr_t entity, boo
             s.diagnostic = s.published.availability;
             logging::log(logging::Level::info, logging::Channel::skater, "Slam telemetry: {} ({} samples, {} rejected)",
                 s.diagnostic, s.published.samples, s.published.dropped);
+        }
+        if (s.retry_diagnostic!=s.retry.status()) {
+            s.retry_diagnostic=s.retry.status();
+            logging::log(logging::Level::info,logging::Channel::skater,
+                "Slam retry: {} (active={}, owned={}, entity={:x}, world={:x}, generation={}).",
+                s.retry_diagnostic,s.retry.active(),owned,entity,retry_frame.world,retry_frame.generation);
         }
     } catch (...) {
         cancel_manual_bail();
@@ -997,6 +1072,7 @@ void before_level_transition(unsigned next) noexcept {
     try {
         auto& s=state();
         if (next==3 || next==14 || next==22 || next==24 || next==25) {
+            s.level_generation.fetch_add(1,std::memory_order_acq_rel);
             cancel_manual_bail();
             s.effects_suspended.store(true,std::memory_order_release);
             s.effects_cancel_requested.store(true,std::memory_order_release);
