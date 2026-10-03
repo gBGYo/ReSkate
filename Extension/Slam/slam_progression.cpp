@@ -89,4 +89,50 @@ std::optional<PersonalBest> decode_personal_best(std::string_view document, std:
         return best.successes <= best.attempts ? std::optional(best) : std::nullopt;
     } catch (...) { return {}; }
 }
+namespace {
+std::string best_identity(std::string_view map,const Config& config) {
+    if (!valid_map(map)) throw std::invalid_argument("Invalid Slam map");
+    return std::string(map)+"\n"+encode_config(config);
+}
+PersonalBest load_best(std::string_view map,const Config& config,const BestBook::Read& read) {
+    const auto saved=read(personal_best_key(map,config));
+    return saved ? decode_personal_best(*saved,map,config).value_or(PersonalBest{}) : PersonalBest{};
+}
+}
+BestView BestBook::lookup(std::string_view map,const Config& config,const Read& read) const {
+    const auto found=entries_.find(best_identity(map,config));
+    if (found!=entries_.end()) return {found->second.best,!found->second.dirty,false};
+    return {load_best(map,config,read),true,false};
+}
+std::optional<BestView> BestBook::record(std::uint64_t serial,std::string_view map,const Result& result,
+    const Read& read,const Write& write) {
+    if (!serial || serial<=last_serial_ || result.phase!=Phase::results || result.cancelled ||
+        !valid_config(result.config) || !std::isfinite(result.target_progress) || result.target_progress<0) return {};
+    const auto identity=best_identity(map,result.config);
+    auto found=entries_.find(identity);
+    if (found==entries_.end()) {
+        const auto best=load_best(map,result.config,read);
+        // Saved entries can be reloaded. Never discard an unsaved attempt.
+        if (entries_.size()>=128) {
+            const auto saved=std::find_if(entries_.begin(),entries_.end(),[](const auto& item) {return !item.second.dirty;});
+            if (saved!=entries_.end()) entries_.erase(saved);
+        }
+        found=entries_.emplace(identity,Entry{std::string(map),result.config,best,false}).first;
+    }
+    auto& entry=found->second;
+    const auto improved=entry.best.record(result);
+    last_serial_=serial;
+    entry.dirty=true;
+    entry.dirty=!write(personal_best_key(entry.map,entry.config),encode_personal_best(entry.map,entry.config,entry.best));
+    return BestView{entry.best,!entry.dirty,improved};
+}
+bool BestBook::flush(const Write& write) {
+    bool saved=true;
+    for (auto& [identity,entry] : entries_) {
+        (void)identity;
+        if (entry.dirty) entry.dirty=!write(personal_best_key(entry.map,entry.config),encode_personal_best(entry.map,entry.config,entry.best));
+        saved=saved && !entry.dirty;
+    }
+    return saved;
+}
 }

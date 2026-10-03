@@ -26,6 +26,7 @@
 #include "Extension/Rendering/graphics_labels.h"
 #include "Extension/Settings/gameplay_settings_override.h"
 #include "Extension/Settings/named_settings.h"
+#include "Extension/Slam/slam_runtime.h"
 #include "Extension/Skater/client_source_spawn.h"
 #include "Extension/Skater/no_bail.h"
 #include "Extension/Skater/skater_slot_override.h"
@@ -412,6 +413,7 @@ extern "C" __declspec(dllexport) BOOL WINAPI DingoSDKDebugInitialize() {
         }
         r.native_loading_logging = dingosdk::start_level_loading_logging(r.base,
             [](std::uintptr_t base, unsigned next) noexcept {
+                dingosdk::slam::before_level_transition(next);
                 dingosdk::local_profile_before_level_transition(next);
                 dingosdk::multiplayer::native_menu_before_level_transition(base, next);
             });

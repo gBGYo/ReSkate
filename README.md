@@ -63,14 +63,34 @@ The menu and console keys can be changed in the launcher's Settings.
 ### Slam Challenge
 
 Open **Skater → SLAM** in the ReSkate menu and choose **Start attempt**, then take a fall.
+With **Manual bail** enabled, press **F8** to request a native wipeout.
+It also works without an attempt when **X-ray in normal play** is on. **Skater → SLAM → BAIL CONTROLS**
+records and saves a different keyboard key or controller chord; controller is initially unbound.
+Release after menus, recovery or reconnecting before pressing again. Menu/console keys and controller
+chords overlapping Noclip or velocity boosts are disabled. **Bail now** and `slam bail` request the
+same transition. Manual bail requires offline play, No Bail, Noclip, Park Editor and First person off,
+an owned local skater, and game focus. Manual bail requests the authored gameplay wipeout through its
+exact condition graph, only when that graph's ContextKey resolves to the verified local skater.
+The compiled output instructions verify the condition's byte binding and the weight's float binding.
+Accepted gameplay delivery stops synthetic physics requests; unrelated scripts and players retain native results.
+This removes the earlier animation delay: native ragdoll entry was measured 7–14ms after F8, versus
+roughly 560ms through the previous physics-only trigger. Riding velocity comes from the owned board's
+world-space rigid body, rather than facing or animation. At entry it transfers horizontal velocity once to the ragdoll trajectory
+and bodies, preserving relative limb motion and native vertical/angular velocities. Constraints and
+recovery remain native. Gameplay requests expire after 500ms; captured velocity has a separate
+1.5-second limit and is discarded after entry, cancellation or an ownership change.
+All four Slam test suites pass. Forward riding, fakie and running off board passed the live playtest:
+bails start promptly and carry the existing direction of travel.
+Additional airborne steering and ragdoll controls are still unfinished.
 The HUD scores distinct impacts, fall distance, airtime and sliding. A skinned 3D X-ray mesh reuses the
-installed game's **Dem Bones** skeleton and highlights injured regions through the skater: orange for
+installed game's **Dem Bones** skeleton, with an ivory-white surface blended with injury-color patches
+and gradients. It highlights injured regions through the skater: orange for
 bruises and red for fractures. Each region awards its
 fracture bonus once per attempt. These are arcade injury scores; the mode does not alter the game's
 ragdoll or damage the skater's bones.
 
 After the round, recover and mount your board, then choose **Retry from here**. **Stop attempt** cancels
-the round; **Dismiss HUD** hides it. Console equivalents are `slam start`, `slam retry`, `slam stop`,
+the round; **Dismiss HUD** hides it. Console equivalents are `slam start`, `slam retry`, `slam bail`, `slam stop`,
 `slam dismiss` and `slam status`.
 
 The prototype requires offline play with No Bail, Noclip and the Park Editor off. Respawns, map changes,
@@ -97,7 +117,25 @@ hand collider, and the skull follows the native head/neck collider; the game doe
 finger or skull-bone contacts. Injuries and fractures are tracked per physical bone for the visual,
 while challenge scoring and fracture bonuses remain grouped into six body regions.
 Impact flashes affect the injured bones and fade once; they do not flash the whole screen. The mesh
-hides in First person to keep the skull from covering the camera, while the challenge keeps scoring.
+adds a short bright hit pulse and optional persistent jagged fracture marks anchored to each bone's
+geometry. A fresh fracture briefly opens the split before it settles; further contacts with that bone
+do not restart the opening. Its position and angle vary between bones and falls, staying fixed after
+that bone breaks. Cuts can occur anywhere from 10% to 90% along each bone's actual geometry,
+leaving a small margin at either end.
+**Impact sound** adds an original thud/crunch clip for confirmed contacts, with its own volume
+slider. Playback stops while the menu is open or the game loses focus. **Impact slow motion** briefly
+slows severe hits and newly fractured bones, then smoothly returns to the previous game speed. Its speed
+and duration are adjustable; further contacts cannot extend a running pulse. Loading, online play,
+recovery, mode conflicts, an open menu or focus loss restore the prior speed. A later player or engine speed change
+takes priority. **Impact camera** adds a bounded 450ms punch-in and damped shake on severe hits or
+new fractures, with adjustable strength. It applies to the submitted gameplay view and the skeleton
+together, preserving the game's original camera state. First person and Free camera pause it.
+**Reduced effects** removes the bright pulse, animated fracture opening, impact camera and automatic slow motion while retaining
+steady injury colors and fracture marks. These effects are presentation;
+they do not split the native ragdoll bones. Native time-scale sampling during repeated live falls
+confirmed the default 30% pulse easing back to 100%. The subjective impact feel is still undergoing
+live validation.
+The mesh hides in First person to keep the skull from covering the camera, while the challenge keeps scoring.
 The current X-ray pass draws through scenery as well as the skater; scene occlusion remains part of
 the full-mode work. No extracted game assets are shipped.
 
@@ -213,6 +251,14 @@ Each module keeps its regression tests in a `Test/` folder. Turn them on with an
 cmake --preset vs2022-x64 -DDINGOSDK_BUILD_MULTIPLAYER_TESTS=ON -DDINGOSDK_BUILD_LAUNCHER_TESTS=ON
 cmake --build --preset release --parallel 4
 ctest --test-dir build/vs2022-x64 -C Release
+```
+
+The Slam suites also check impact timing, saved visual options and temporary speed ownership:
+
+```powershell
+cmake --preset vs2022-x64 -DDINGOSDK_BUILD_SLAM_TESTS=ON
+cmake --build --preset release --target dingosdk_slam_tests dingosdk_slam_visuals_tests dingosdk_slam_settings_tests --parallel 4
+ctest --test-dir build/vs2022-x64 -C Release --output-on-failure -R "^slam_"
 ```
 
 The project builds with `/W4 /WX`: warnings are errors.

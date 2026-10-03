@@ -9,6 +9,20 @@ struct LocalBailOwner {
     bool operator==(const LocalBailOwner&) const = default;
 };
 bool resolve_local_bail_owner(std::uintptr_t client, std::uintptr_t entity, LocalBailOwner& result) noexcept;
+// Walking recovery is a verified ground/slide substate of the owned Offboard
+// parent, with no outstanding native wipeout animation request.
+bool local_bail_recovered(const LocalBailOwner& owner) noexcept;
+// Queue from the offline client tick; hooks revalidate the same owner at use.
+// Authored gameplay consumes the owned request; native physics/animation follow
+// its transition. The bounded fallback supplies scoped physics request bits.
+bool queue_manual_bail(std::uintptr_t client,std::uintptr_t entity) noexcept;
+void cancel_manual_bail() noexcept;
+// Shared native expression runner calls this after the authored predicate.
+// Only a queued manual bail for the predicate's verified local ContextKey
+// can supply its result; unrelated scripts and entities retain native results.
+void apply_manual_bail_expression(std::uintptr_t vm,std::uint32_t pc) noexcept;
+struct ManualBailStatus { std::uint64_t queued{},selected{},published{}; };
+ManualBailStatus manual_bail_status() noexcept;
 bool start_no_bail(std::uintptr_t image_base) noexcept;
 bool no_bail_available() noexcept;
 // Publish from the validated local client tick. Returns owner availability even

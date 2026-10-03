@@ -1,6 +1,7 @@
 #include "overlay_internal.h"
 #include "Extension/Slam/slam_runtime.h"
 #include "slam_mesh_renderer.h"
+#include "Engine/Core/Platform/launcher_support.h"
 
 namespace dingosdk::overlay::detail {
 void draw_slam() {
@@ -17,6 +18,12 @@ void draw_slam() {
     ImGui::Text("%u impacts  |  %u fractured regions", result.impacts, result.fractures);
     ImGui::Text("Fall %.1f m  |  Air %.1f s  |  Slide %.1f m", result.fall_m, result.airtime_s, result.slide_m);
     ImGui::TextUnformatted(result.detail.c_str());
+    if (result.phase==slam::Phase::attempt && value.bail_available) {
+        if (value.bail_controls.key && !value.bail_key_conflict)
+            ImGui::Text("Bail: %s",launcher::key_name(value.bail_controls.key).c_str());
+        if (value.bail_controls.controller_combo && !value.bail_controller_conflict)
+            ImGui::Text("Bail: %s",controller_combo_label(value.bail_controls.controller_combo).c_str());
+    }
     const auto render_status=slam_mesh_renderer_status();
     if (!value.mesh) ImGui::TextUnformatted(value.mesh_status.c_str());
     else if (render_status.starts_with("3D X-ray unavailable")) ImGui::TextUnformatted(render_status.data(),render_status.data()+render_status.size());

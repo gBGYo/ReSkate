@@ -1,7 +1,9 @@
 #include "Extension/Slam/slam_visuals.h"
+#include "Engine/Game/Settings/transient_float_lease.h"
 #include <cmath>
 #include <iostream>
 #include <limits>
+#include <algorithm>
 
 namespace {
 using namespace dingosdk::slam;
@@ -15,9 +17,14 @@ void saved_options() {
         "Default X-ray options survive a save and reload");
     auto options=defaults; options.visibility=XrayVisibility::impact; options.reduced_effects=true;
     options.opacity=.1f; options.flash_strength=1; options.impact_duration_s=5; options.only_impacted=true; options.normal_play=true;
+    options.impact_sound=false; options.fracture_marks=false; options.sound_volume=.2f;
+    options.slow_motion=false; options.slow_motion_scale=.5f; options.slow_motion_seconds=.8f;
+    options.impact_camera=false; options.impact_camera_strength=.4f;
     check(decode_visual_options(encode_visual_options(options))==std::optional(options),
         "Reduced effects, timing and opacity survive together");
     check(!decode_visual_options("{}") && !decode_visual_options("{\"version\":2}"),"Missing and unsupported settings cannot replace defaults");
+    check(decode_visual_options(R"({"version":1,"visibility":0,"opacity":0.86,"flash":0.35,"impactSeconds":1.5,"reduced":false})")==std::optional(defaults),
+        "Original X-ray saves gain the new impact options without losing their saved settings");
     const auto encoded=encode_visual_options(options);
     auto legacy=encoded; const auto added=legacy.find("\"onlyImpacted\":true,"); legacy.erase(added,20);
     auto old=options; old.only_impacted=false;
@@ -75,6 +82,120 @@ void normal_play_falls() {
     options.visibility=XrayVisibility::off;
     check(visual_appearance(options,xray.result(),xray.events(),8000,false,true).opacity==0,"Off overrides standalone X-ray");
 }
+void impact_feedback() {
+    VisualOptions options;
+    Result result; result.phase=Phase::bailed;
+    VisualEvents events;
+    result.impacts=1; result.bone_injuries[102]={80,0,false}; events.observe(result,1000);
+    check(events.latest_bone==102 && events.latest_severity==80 && !events.latest_fracture,
+        "A contact sound identifies the affected bone and new severity");
+    check(visual_appearance(options,result,events,1000,false).damage[102][1]>0 &&
+        visual_appearance(options,result,events,1000,false).damage[277][1]==0,
+        "The sharp impact pulse affects only contacted bones");
+    result.impacts=3; result.bone_injuries[102].severity=400; result.bone_injuries[277]={250,0,true};
+    events.observe(result,1200);
+    check(events.latest_bone==277 && events.latest_fracture && events.latest_severity==250,
+        "A new fracture takes sound priority over a stronger repeat hit in the same batch");
+    check(events.fractures_at_ms[277]==1200 && visual_appearance(options,result,events,1200,false).damage[277][3]==1,
+        "A fractured bone opens once using its own fracture time");
+    ++result.impacts; result.bone_injuries[277].severity+=10; events.observe(result,1250);
+    check(events.fractures_at_ms[277]==1200 && !events.latest_fracture,
+        "Repeated contact with a broken bone cannot restart the fracture opening");
+    const auto recorded=events;
+    events.observe(result,1260);
+    check(events.latest_impact_ms==recorded.latest_impact_ms && events.latest_severity==10,
+        "Republishing an unchanged impact does not retrigger sound or flash timing");
+    const auto late=visual_appearance(options,result,events,1600,false);
+    check(late.damage[277][0]==1 && late.damage[277][1]==0 && late.damage[277][3]==0,"Fracture marks remain after the short hit pulse and fracture opening expire");
+    options.reduced_effects=true;
+    const auto reduced=visual_appearance(options,result,events,1200,false);
+    check(reduced.damage[277][0]==1 && reduced.damage[277][1]==0 && reduced.damage[277][3]==0,"Reduced effects keeps fracture marks without a bright flash or animated opening");
+    options.fracture_marks=false;
+    check(visual_appearance(options,result,events,1200,false).damage[277][0]==0,"Fracture marks have an independent off switch");
+    for (const bool fracture : {false,true}) {
+        const auto pcm=make_impact_sound(fracture);
+        const auto peak=std::max_element(pcm.begin(),pcm.end(),[](auto a,auto b) {return std::abs(static_cast<int>(a))<std::abs(static_cast<int>(b));});
+        check(pcm.size()==9600 && pcm.front()==0 && pcm.back()==0 && std::abs(static_cast<int>(*peak))<=26214,
+            "Synthesized impact clips are short, bounded below full scale and start/end without a sample jump");
+        double early{},late_energy{};
+        for (std::size_t i=0;i<pcm.size();++i) {
+            const double energy=static_cast<double>(pcm[i])*pcm[i];
+            if (i<2400) early+=energy;
+            if (i>=7200) late_energy+=energy;
+        }
+        check(early>late_energy*20,"The impact's attack decays instead of sustaining an alarm-like sound");
+    }
+    options.sound_volume=std::numeric_limits<float>::infinity();
+    check(!valid_visual_options(options),"Non-finite sound gain cannot reach playback");
+}
+void time_scale_ownership() {
+    using dingosdk::FloatSettingSample;
+    using dingosdk::TransientFloatLease;
+    FloatSettingSample engine{11,22,33,.6f};
+    bool readable=true,accepted=true,owns_during_write{};
+    unsigned writes{};
+    TransientFloatLease lease;
+    const auto read=[&]()->std::optional<FloatSettingSample> {return readable ? std::optional(engine) : std::nullopt;};
+    const auto write=[&](const FloatSettingSample& expected,float value) {
+        ++writes;
+        owns_during_write=lease.owns(engine);
+        if (!accepted || engine!=expected) return false;
+        engine.value=value; return true;
+    };
+    check(lease.begin(.3f,read,write) && std::abs(engine.value-.18f)<.0001f && owns_during_write,
+        "The pulse multiplies the player's current game speed and owns its pre-write sample");
+    check(lease.update(.5f,read,write) && std::abs(engine.value-.3f)<.0001f && owns_during_write,
+        "Recovery uses the original speed, without multiplying the already slowed value");
+    check(lease.restore(read,write) && !lease.active() && engine.value==.6f,"Pulse completion restores the original non-default game speed");
+    check(lease.begin(.3f,read,write),"A second impact can acquire the restored setting");
+    engine.value=.8f; const auto before_external=writes;
+    check(lease.restore(read,write) && !lease.active() && engine.value==.8f && writes==before_external,
+        "A newer external speed is preserved without writing the old original over it");
+    check(lease.begin(.3f,read,write),"A pulse can begin over the new player speed");
+    engine.address=44; const auto before_reuse=writes;
+    check(!lease.update(.4f,read,write) && !lease.active() && writes==before_reuse,
+        "A replaced native field cannot receive an update from its old lease");
+    engine.value=.6f;
+    check(lease.begin(.3f,read,write),"A fresh native field gets an independent lease");
+    readable=false;
+    check(!lease.update(.4f,read,write) && !lease.restore(read,write) && lease.active(),
+        "A temporary unreadable field retains cleanup ownership for a later retry");
+    readable=true;
+    check(lease.restore(read,write) && engine.value==.6f,"A recovered native field can complete delayed cleanup");
+    accepted=false;
+    check(!lease.begin(.3f,read,write) && !lease.active() && engine.value==.6f,"A rejected setter cannot start a pulse or change the original speed");
+    const auto before_invalid=writes;
+    check(!lease.begin(0,read,write) && !lease.begin(std::numeric_limits<float>::quiet_NaN(),read,write) && writes==before_invalid,
+        "Freeze and non-finite pulse factors cannot reach the native setter");
+}
+void slow_motion_envelope() {
+    VisualOptions options; options.slow_motion_seconds=.5f;
+    VisualEvents event; event.latest_impact_ms=1000; event.latest_severity=400;
+    SlowMotionPulse pulse;
+    const auto start=pulse.step(options,event,1000,true);
+    check(start.active && start.started && start.factor==options.slow_motion_scale,"A fresh severe hit starts a bounded slow-motion pulse");
+    const auto middle=pulse.step(options,event,1250,true);
+    check(middle.active && !middle.started && middle.factor>start.factor && middle.factor<1,"The pulse returns smoothly toward the original speed");
+    event.latest_impact_ms=1300;
+    check(!pulse.step(options,event,1300,true).started && !pulse.step(options,event,1500,true).active,
+        "Further ragdoll contacts cannot prolong the current pulse");
+    event.latest_impact_ms=1600; event.latest_fracture=true; event.latest_severity=20;
+    check(pulse.step(options,event,1600,true).started,"A new fracture can start the next pulse even at lower contact severity");
+    check(!pulse.step(options,event,1650,false).active,"Focus loss, map change or a mode conflict cancels the pulse immediately");
+    check(!pulse.step(options,event,1660,true).started,"Returning to play cannot replay the cancelled hit");
+    event.latest_impact_ms=2200; options.reduced_effects=true;
+    check(!pulse.step(options,event,2200,true).active,"Reduced effects prevents automatic slow motion");
+    options.reduced_effects=false;
+    check(!pulse.step(options,event,2250,true).started,"Turning effects back on cannot replay an old contact");
+    event.latest_impact_ms=2500; event.latest_fracture=false; event.latest_severity=100;
+    check(!pulse.step(options,event,2500,true).active,"Minor contacts do not slow normal skating");
+    event.latest_impact_ms=2600; event.latest_severity=400;
+    check(!pulse.step(options,event,2800,true).active,"A stale contact cannot trigger delayed slow motion");
+    event.latest_impact_ms=3000;
+    check(pulse.step(options,event,3000,true).active,"A fresh severe impact can begin after the cooldown");
+    event.reset();
+    check(!pulse.step(options,event,3010,true).active,"Recovery or dismissal clears the impact and immediately cancels slow motion");
+}
 void visibility_and_flashes() {
     VisualOptions options;
     VisualEvents events;
@@ -130,8 +251,28 @@ void visibility_and_flashes() {
     check(!events.latest_impact_ms,"Retry clears impact times before a new fall");
 }
 }
+void impact_camera_timing() {
+    VisualOptions options; VisualEvents event;
+    event.latest_impact_ms=1000; event.latest_severity=500;
+    ImpactCameraPulse pulse;
+    const auto impulse=pulse.step(options,event,1000,true);
+    const auto middle=sample_camera_impulse(impulse,1100);
+    check(impulse.started_ms==1000 && middle.active && middle.fov_scale<1 && middle.fov_scale>=.8f &&
+        std::abs(middle.translation[0])<.05f && std::abs(middle.roll)<.03f,"Severe hits produce a bounded local camera response");
+    event.latest_impact_ms=1200;
+    check(pulse.step(options,event,1200,true).started_ms==1000 && !sample_camera_impulse(impulse,1450).active,
+        "Further contacts do not extend the camera response beyond its original end");
+    event.latest_impact_ms=1600; event.latest_fracture=true;
+    check(pulse.step(options,event,1600,true).started_ms==1600,"A later fracture can start a new camera response");
+    check(!pulse.step(options,event,1610,false).started_ms && !pulse.step(options,event,1620,true).started_ms,
+        "Focus or mode cancellation cannot replay a previous camera impact when play resumes");
+    options.reduced_effects=true; event.latest_impact_ms=2200;
+    check(!pulse.step(options,event,2200,true).started_ms,"Reduced effects disables automatic camera response");
+    options.reduced_effects=false; event.latest_impact_ms=2300; event.latest_fracture=false; event.latest_severity=100;
+    check(!pulse.step(options,event,2300,true).started_ms,"Minor contacts cannot shake the normal skating camera");
+}
 int main() {
-    saved_options(); visibility_and_flashes(); normal_play_falls();
+    saved_options(); visibility_and_flashes(); normal_play_falls(); impact_feedback(); time_scale_ownership(); slow_motion_envelope(); impact_camera_timing();
     if (failures) return 1;
     std::cout<<"Slam visual timing, accessibility and saved-options checks passed.\n";
 }

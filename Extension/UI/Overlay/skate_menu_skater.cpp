@@ -1,5 +1,7 @@
 #include "skate_menu_internal.h"
 #include "Extension/Slam/slam_runtime.h"
+#include "Extension/UI/Overlay/input_capture.h"
+#include "Engine/Core/Platform/launcher_support.h"
 
 #include <array>
 #include <cmath>
@@ -160,6 +162,10 @@ void skater_page(SkateMenu& menu, const Model& model, const CallbacksV3& callbac
         if (ImGui::Button(value.result.phase == dingosdk::slam::Phase::ready ? "Start attempt" : "Retry from here", ImVec2(-FLT_MIN, 0)))
             (void)dingosdk::slam::request(dingosdk::slam::Action::start);
         ImGui::EndDisabled();
+        ImGui::BeginDisabled(!value.bail_available);
+        if (ImGui::Button("Bail now",ImVec2(-FLT_MIN,0))) (void)dingosdk::slam::request(dingosdk::slam::Action::bail);
+        ImGui::EndDisabled();
+        note(value.bail_status.c_str());
         if (value.result.phase == dingosdk::slam::Phase::attempt || value.result.phase == dingosdk::slam::Phase::bailed ||
             value.result.phase == dingosdk::slam::Phase::settled) {
             if (ImGui::Button("Stop attempt", ImVec2(-FLT_MIN, 0))) (void)dingosdk::slam::request(dingosdk::slam::Action::stop);
@@ -167,6 +173,68 @@ void skater_page(SkateMenu& menu, const Model& model, const CallbacksV3& callbac
         if (value.visible && ImGui::Button("Dismiss HUD", ImVec2(-FLT_MIN, 0))) (void)dingosdk::slam::request(dingosdk::slam::Action::dismiss);
         note("Recover and get back on your board before retrying. Dem Bones supplies the 3D X-ray skeleton and injury highlights.");
         note(value.mesh_status.c_str());
+        end_card();
+        begin_card(menu,"slam-controls","BAIL CONTROLS");
+        auto controls=value.bail_controls;
+        bool controls_changed=false;
+        ImGui::BeginDisabled(!value.bail_controls_ready);
+        controls_changed|=toggle_row(menu,"Manual bail","Trigger a native wipeout during attempts or normal-play X-ray.",controls.enabled);
+        ControllerInput controller;
+        DingoSDKOverlayReadControllerInput(&controller,true);
+        DWORD foreground_process{};
+        GetWindowThreadProcessId(GetForegroundWindow(),&foreground_process);
+        if (menu.slam_bind_capture && (ImGui::GetTime()>=menu.slam_capture_until ||
+            foreground_process!=GetCurrentProcessId() || !value.bail_controls_ready)) menu.slam_bind_capture=0;
+        field(menu,"Bail key");
+        const auto key_label=(menu.slam_bind_capture==1 ? std::string("Press a key...") :
+            controls.key ? launcher::key_name(controls.key) : std::string("Not bound"))+"###slam-key";
+        if (ImGui::Button(key_label.c_str(),ImVec2(-FLT_MIN,0))) {
+            menu.slam_bind_capture=1; menu.slam_capture_until=ImGui::GetTime()+30;
+            detail::OverlayInputAccess access;
+            for (int key=0;key<256;++key) menu.slam_keys_down[key]=(GetAsyncKeyState(key)&0x8000)!=0;
+        }
+        if (ImGui::SmallButton("Clear key")) {controls.key=0; controls_changed=true; menu.slam_bind_capture=0;}
+        field(menu,"Bail controller combo");
+        const auto pad_label=(menu.slam_bind_capture==2 ? std::string("Recording...") :
+            controller_combo_label(controls.controller_combo,controller.style))+"###slam-controller";
+        if (ImGui::Button(pad_label.c_str(),ImVec2(-FLT_MIN,0))) {
+            menu.slam_bind_capture=2; menu.slam_controller_capture={}; menu.slam_capture_until=ImGui::GetTime()+30;
+        }
+        if (ImGui::SmallButton("Clear controller combo")) {controls.controller_combo=0; controls_changed=true; menu.slam_bind_capture=0;}
+        if (menu.slam_bind_capture) {
+            detail::OverlayInputAccess access;
+            if (GetAsyncKeyState(VK_ESCAPE)&0x8000) menu.slam_bind_capture=0;
+            if (menu.slam_bind_capture==1) {
+                const auto keys=launcher::overlay_keys();
+                for (int key=1;key<256;++key) {
+                    const bool down=(GetAsyncKeyState(key)&0x8000)!=0;
+                    const bool pressed=down && !menu.slam_keys_down[key];
+                    menu.slam_keys_down[key]=down;
+                    if (!pressed || !dingosdk::slam::valid_bail_key(static_cast<unsigned>(key)) ||
+                        static_cast<unsigned>(key)==keys.menu || static_cast<unsigned>(key)==keys.console) continue;
+                    controls.key=static_cast<unsigned>(key); controls_changed=true; menu.slam_bind_capture=0; break;
+                }
+            } else if (menu.slam_bind_capture==2) {
+                if (const auto combo=menu.slam_controller_capture.update(controller)) {
+                    controls.controller_combo=*combo; controls_changed=true; menu.slam_bind_capture=0;
+                }
+            }
+            if (menu.slam_bind_capture) {
+                note(menu.slam_bind_capture==1 ? "Press a key. Menu/console keys and modifiers are reserved. Escape cancels." :
+                    !controller.available ? "Connect a controller. Escape cancels." :
+                    !menu.slam_controller_capture.ready ? "Release all controller buttons first." :
+                    "Hold the desired combo, then release it to save. Escape cancels.");
+                if (ImGui::SmallButton("Cancel recording")) menu.slam_bind_capture=0;
+            }
+        }
+        if (ImGui::Button("Reset bail controls",ImVec2(-FLT_MIN,0))) {controls={}; controls_changed=true; menu.slam_bind_capture=0;}
+        ImGui::EndDisabled();
+        if (controls_changed) (void)dingosdk::slam::set_bail_controls(controls);
+        if (value.bail_key_conflict) warn("Bail key overlaps your menu or console key; choose another key.");
+        if (value.bail_controller_conflict) warn("Bail combo overlaps Noclip or a velocity boost and is disabled; choose a different combo.");
+        note("F8 is the default. Controller is unbound until recorded. Hold does not repeat; release after menus or recovery before pressing again.");
+        note("Use while riding or airborne. No Bail, Noclip, Park Editor, First person and online play block manual bails.");
+        if (!value.bail_controls_save_status.empty()) note(value.bail_controls_save_status.c_str());
         end_card();
         begin_card(menu,"slam-xray","X-RAY");
         auto visuals=value.visuals;
@@ -191,8 +259,29 @@ void skater_page(SkateMenu& menu, const Model& model, const CallbacksV3& callbac
         field(menu,"Opacity"); ImGui::SetNextItemWidth(-FLT_MIN);
         changed|=ImGui::SliderFloat("##slam-xray-opacity",&visuals.opacity,.1f,1.f,"%.2f",ImGuiSliderFlags_AlwaysClamp);
         if (toggle_row(menu,"Only impacted bones","Reveal the bones involved in hard contacts; hide untouched bones.",visuals.only_impacted,value.visual_options_ready)) changed=true;
-        if (toggle_row(menu,"Reduced effects","Keep steady injury colors and disable impact flashes.",visuals.reduced_effects,value.visual_options_ready)) changed=true;
+        if (toggle_row(menu,"Reduced effects","Keep steady injury colors; disable flashes, camera impacts and slow motion.",visuals.reduced_effects,value.visual_options_ready)) changed=true;
+        if (toggle_row(menu,"Fracture marks","Show a persistent jagged crack on fractured bones.",visuals.fracture_marks,value.visual_options_ready)) changed=true;
+        if (toggle_row(menu,"Impact sound","Add a thud for contacts and a crunch when a bone fractures.",visuals.impact_sound,value.visual_options_ready)) changed=true;
+        ImGui::BeginDisabled(!visuals.impact_sound);
+        field(menu,"Impact sound volume"); ImGui::SetNextItemWidth(-FLT_MIN);
+        changed|=ImGui::SliderFloat("##slam-sound-volume",&visuals.sound_volume,0.f,1.f,"%.2f",ImGuiSliderFlags_AlwaysClamp);
+        ImGui::EndDisabled();
         ImGui::BeginDisabled(visuals.reduced_effects);
+        if (toggle_row(menu,"Impact camera","Briefly punch in and shake the gameplay camera on severe hits or fractures.",visuals.impact_camera,value.visual_options_ready)) changed=true;
+        ImGui::BeginDisabled(!visuals.impact_camera);
+        field(menu,"Camera impact strength"); ImGui::SetNextItemWidth(-FLT_MIN);
+        changed|=ImGui::SliderFloat("##slam-camera-strength",&visuals.impact_camera_strength,0.f,1.f,"%.2f",ImGuiSliderFlags_AlwaysClamp);
+        ImGui::EndDisabled();
+        if (toggle_row(menu,"Impact slow motion","Briefly slow severe hits and new fractures, then restore your game speed.",visuals.slow_motion,value.visual_options_ready)) changed=true;
+        ImGui::BeginDisabled(!visuals.slow_motion);
+        field(menu,"Game speed on impact"); ImGui::SetNextItemWidth(-FLT_MIN);
+        int impact_speed=static_cast<int>(std::lround(visuals.slow_motion_scale*100));
+        if (ImGui::SliderInt("##slam-impact-speed",&impact_speed,10,100,"%d%%",ImGuiSliderFlags_AlwaysClamp)) {
+            visuals.slow_motion_scale=static_cast<float>(impact_speed)/100; changed=true;
+        }
+        field(menu,"Slow-motion duration"); ImGui::SetNextItemWidth(-FLT_MIN);
+        changed|=ImGui::SliderFloat("##slam-slow-motion-seconds",&visuals.slow_motion_seconds,.15f,1.f,"%.2f seconds",ImGuiSliderFlags_AlwaysClamp);
+        ImGui::EndDisabled();
         field(menu,"Impact flash strength"); ImGui::SetNextItemWidth(-FLT_MIN);
         changed|=ImGui::SliderFloat("##slam-xray-flash",&visuals.flash_strength,0.f,1.f,"%.2f",ImGuiSliderFlags_AlwaysClamp);
         ImGui::EndDisabled();
@@ -208,10 +297,17 @@ void skater_page(SkateMenu& menu, const Model& model, const CallbacksV3& callbac
         if (value.first_person) note("The skeleton is hidden while First person is enabled.");
         note("Blue: uninjured. Orange: bruised. Red: fractured. X-ray settings are saved automatically.");
         if (!value.visual_save_status.empty()) note(value.visual_save_status.c_str());
+        if (visuals.impact_sound && !value.impact_audio_status.empty()) note(value.impact_audio_status.c_str());
+        if (visuals.reduced_effects) note("Reduced effects suppresses bright pulses, camera impacts and automatic slow motion.");
+        else if (visuals.slow_motion && !value.slow_motion_status.empty()) note(value.slow_motion_status.c_str());
+        if (visuals.impact_camera && !visuals.reduced_effects && !value.impact_camera_available) note("Impact camera is unavailable in the current view.");
         end_card();
         if (ImGui::TreeNode("Telemetry")) {
             ImGui::Text("Samples: %llu  |  Rejected: %llu", static_cast<unsigned long long>(value.samples), static_cast<unsigned long long>(value.dropped));
             ImGui::Text("Contacts: %u  |  Physics state: %u", value.contacts, value.physics_state);
+            ImGui::Text("Manual bails: %llu queued | %llu selected | %llu published",
+                static_cast<unsigned long long>(value.manual_bails_queued),static_cast<unsigned long long>(value.manual_bails_selected),
+                static_cast<unsigned long long>(value.manual_bails_published));
             ImGui::Text("Rendered poses: %llu  |  Rejected: %llu", static_cast<unsigned long long>(value.rendered_poses),
                 static_cast<unsigned long long>(value.rejected_poses));
             ImGui::Text("Render exports: %llu  |  Evaluations: %llu  |  Superseded: %llu",

@@ -89,6 +89,68 @@ bool decode_render_camera(std::span<const std::byte> input, RenderCamera& output
     output=next;
     return true;
 }
+bool offset_render_camera(std::span<std::byte> input,const Vec3& translation,float roll,float fov_scale,RenderCamera& output) noexcept {
+    RenderCamera original;
+    if (!decode_render_camera(input,original) || !std::isfinite(roll) || std::abs(roll)>.03f ||
+        !std::isfinite(fov_scale) || fov_scale<.8f || fov_scale>1 ||
+        !std::all_of(translation.begin(),translation.end(),[](float v) {return std::isfinite(v) && std::abs(v)<=.2f;})) return false;
+    std::array<std::byte,320> candidate;
+    std::copy(input.begin(),input.end(),candidate.begin());
+    auto world=original.world;
+    const auto cosine=std::cos(roll),sine=std::sin(roll);
+    for (std::size_t axis=0;axis<3;++axis) {
+        world[axis]=original.world[axis]*cosine+original.world[4+axis]*sine;
+        world[4+axis]=original.world[4+axis]*cosine-original.world[axis]*sine;
+        world[12+axis]+=translation[0]*original.world[axis]+translation[1]*original.world[4+axis]+translation[2]*original.world[8+axis];
+    }
+    for (std::size_t row=0;row<4;++row)
+        std::memcpy(candidate.data()+0x40+row*16,world.data()+row*4,12);
+    const float radians=original.vertical_fov*fov_scale*3.14159265358979323846f/180;
+    std::memcpy(candidate.data()+0x104,&radians,4);
+    RenderCamera next;
+    if (!decode_render_camera(candidate,next)) return false;
+    std::copy(candidate.begin(),candidate.end(),input.begin()); output=next;
+    return true;
+}
+FractureLocation varied_fracture_location(unsigned bone,std::uint64_t fracture_ms) noexcept {
+    std::uint32_t seed=static_cast<std::uint32_t>(fracture_ms)^static_cast<std::uint32_t>(fracture_ms>>32)^((bone+1)*0x9e3779b9u);
+    const auto random=[&]() {
+        seed+=0x9e3779b9u;
+        auto value=seed;
+        value=(value^(value>>16))*0x85ebca6bu;
+        value=(value^(value>>13))*0xc2b2ae35u;
+        value^=value>>16;
+        return static_cast<float>(value>>8)/16777215.f;
+    };
+    const float fraction=.1f+.8f*random();
+    const float first=(random()*2-1)*.18f,second=(random()*2-1)*.18f;
+    return {fraction,first,second};
+}
+std::optional<std::array<float,4>> make_fracture_plane(const PoseMatrix& inverse_bind,
+    const Vec3& low,const Vec3& high,const FractureLocation& location) noexcept {
+    if (!std::isfinite(location.fraction) || location.fraction<.1f || location.fraction>.9f ||
+        !std::isfinite(location.tilt_a) || std::abs(location.tilt_a)>.18f ||
+        !std::isfinite(location.tilt_b) || std::abs(location.tilt_b)>.18f ||
+        !std::all_of(inverse_bind.begin(),inverse_bind.end(),[](float v) {return std::isfinite(v);})) return {};
+    std::size_t axis{};
+    Vec3 anchor{};
+    for (std::size_t i=0;i<3;++i) {
+        if (!std::isfinite(low[i]) || !std::isfinite(high[i]) || high[i]<low[i]) return {};
+        anchor[i]=(low[i]+high[i])*.5f;
+        if (high[i]-low[i]>high[axis]-low[axis]) axis=i;
+    }
+    if (high[axis]-low[axis]<.00001f) return {};
+    anchor[axis]=low[axis]+(high[axis]-low[axis])*location.fraction;
+    Vec3 normal{}; normal[axis]=1;
+    normal[(axis+1)%3]=location.tilt_a; normal[(axis+2)%3]=location.tilt_b;
+    const float length=std::sqrt(1+location.tilt_a*location.tilt_a+location.tilt_b*location.tilt_b);
+    for (auto& value : normal) value/=length;
+    std::array<float,4> plane{};
+    for (std::size_t row=0;row<4;++row)
+        for (std::size_t i=0;i<3;++i) plane[row]+=inverse_bind[row*4+i]*normal[i];
+    for (std::size_t i=0;i<3;++i) plane[3]-=anchor[i]*normal[i];
+    return plane;
+}
 PoseMatrix compose_matrices(const PoseMatrix& local, const PoseMatrix& parent) noexcept {
     PoseMatrix result{};
     for (std::size_t row=0;row<3;++row)

@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <cstring>
 #include <future>
+#include <limits>
 #include <stdexcept>
 #include <vector>
 
@@ -20,6 +21,8 @@ cbuffer Scene : register(b0) {
     row_major float4x4 camera;
     float4 projection; // focal x/y, near, far
     float4 colors[395];
+    float4 damage[395];
+    float4 fracturePlanes[395];
 };
 struct Vertex {
     float3 position : POSITION; float3 normal : NORMAL;
@@ -28,7 +31,7 @@ struct Vertex {
     uint region : REGION;
     uint part : PART;
 };
-struct Pixel { float4 position : SV_POSITION; float3 normal : NORMAL; nointerpolation uint part : PART; };
+struct Pixel { float4 position : SV_POSITION; float3 normal : NORMAL; float3 bindPosition : TEXCOORD0; nointerpolation uint part : PART; };
 Pixel vs(Vertex input) {
     float4 world=0; float3 normal=0;
     [unroll] for (uint i=0;i<4;++i) {
@@ -43,6 +46,7 @@ Pixel vs(Vertex input) {
     output.position=float4(view.x*projection.x,view.y*projection.y,
         (depth*projection.w-projection.z*projection.w)/(projection.w-projection.z),depth);
     output.normal=mul(float4(normal,0),camera).xyz;
+    output.bindPosition=input.position;
     output.part=min(input.part,394); return output;
 }
 float4 ps(Pixel input) : SV_TARGET {
@@ -51,7 +55,32 @@ float4 ps(Pixel input) : SV_TARGET {
     float rim=pow(1-abs(normal.z),2);
     float4 color=colors[input.part];
     clip(color.a-.001);
-    return float4(color.rgb*(.35+.6*diffuse)+float3(.12,.18,.2)*rim,color.a);
+    float seed=float(input.part)*2.31;
+    // Stable bind-space patches preserve the ivory bone surface while
+    // concentrating the injury color rather than coating the entire bone.
+    float broad=.5+.5*sin(dot(input.bindPosition,float3(17,23,19))+seed);
+    float detail=.5+.5*sin(dot(input.bindPosition,float3(53,41,61))-seed);
+    float patch=smoothstep(.22,.8,broad*.7+detail*.3);
+    float tint=(.08+.78*patch)*damage[input.part].z;
+    float3 bone=lerp(float3(.96,.94,.87),color.rgb,tint);
+    float3 surface=bone*(.4+.58*diffuse)+float3(.12,.16,.18)*rim;
+    // Each fracture's stable jagged plane in body bind space follows the
+    // same skinning as its bone. It never displaces the synchronized pose.
+    float jagged=.0025*sin(dot(input.bindPosition,float3(113,167,137))+seed)
+        +.0015*sin(dot(input.bindPosition,float3(251,179,223))-seed);
+    float seam=abs(dot(float4(input.bindPosition,1),fracturePlanes[input.part])+jagged);
+    float width=max(fwidth(seam)*1.2,.0015);
+    // A visible split in the X-ray surface opens once at the fracture,
+    // then settles. Reduced effects keeps the steady crack instead.
+    float opening=(.0015+.005*damage[input.part].w)*damage[input.part].x;
+    if (opening>0) clip(seam-opening);
+    float fractureDistance=max(0,seam-opening);
+    float crack=(1-smoothstep(width,width*2.5,fractureDistance))*damage[input.part].x;
+    float edge=(1-smoothstep(width*2.5,width*5,fractureDistance))*damage[input.part].x;
+    surface=lerp(surface,float3(.035,.008,.012),crack*.95);
+    surface+=float3(.32,.06,.025)*max(0,edge-crack);
+    surface+=float3(1,.92,.78)*damage[input.part].y;
+    return float4(surface,color.a);
 }
 )";
 struct Constants {
@@ -59,6 +88,7 @@ struct Constants {
     slam::PoseMatrix camera;
     std::array<float,4> projection;
     std::array<std::array<float,4>,slam::injury_bone_count> colors;
+    std::array<std::array<float,4>,slam::injury_bone_count> damage, fracture_planes;
 };
 struct FrameResources {
     ComPtr<ID3D12Resource> constants,depth;
@@ -73,6 +103,10 @@ struct Renderer {
     D3D12_VERTEX_BUFFER_VIEW vertex_view{};
     D3D12_INDEX_BUFFER_VIEW index_view{};
     std::shared_ptr<const slam::SkeletonMesh> mesh;
+    std::array<std::array<float,4>,slam::injury_bone_count> fracture_planes{};
+    std::array<slam::Vec3,slam::injury_bone_count> fracture_low{},fracture_high{};
+    std::array<bool,slam::injury_bone_count> fracture_used{};
+    std::array<std::uint64_t,slam::injury_bone_count> fracture_cached_at{};
     std::future<std::shared_ptr<Renderer>> preparation;
     std::string status;
     bool failed{},drawn{};
@@ -150,6 +184,29 @@ void setup(Renderer& r,ID3D12Device* device,DXGI_FORMAT format,std::size_t frame
     check(device->CreateDescriptorHeap(&depths,IID_PPV_ARGS(&r.depths)),"Cannot create X-ray depth descriptors");
     r.frames.resize(frames);
     for (auto& frame : r.frames) frame.constants=upload(device,(sizeof(Constants)+255)&~std::size_t{255});
+    // Cache actual bone extents once. Each fracture then chooses a stable
+    // interior location/angle within its own geometry, independent of pose.
+    std::array<slam::Vec3,slam::injury_bone_count> low{},high{};
+    std::array<bool,slam::injury_bone_count> used{};
+    for (auto& point : low) point.fill(std::numeric_limits<float>::max());
+    for (auto& point : high) point.fill(std::numeric_limits<float>::lowest());
+    for (const auto& vertex : mesh->vertices) {
+        const auto part=vertex.part;
+        if (part>=slam::render_bone_count) continue;
+        const auto local=slam::model_to_world(mesh->rig.inverse_bind[part],vertex.position);
+        used[part]=true;
+        for (std::size_t axis=0;axis<3;++axis) {
+            low[part][axis]=std::min(low[part][axis],local[axis]);
+            high[part][axis]=std::max(high[part][axis],local[axis]);
+        }
+    }
+    r.fracture_planes.fill({0,0,0,1});
+    for (std::size_t part=0;part<slam::render_bone_count;++part) {
+        if (!used[part]) continue;
+        const auto plane=slam::make_fracture_plane(mesh->rig.inverse_bind[part],low[part],high[part],{});
+        if (plane) r.fracture_planes[part]=*plane;
+    }
+    r.fracture_low=low; r.fracture_high=high; r.fracture_used=used;
     r.mesh=std::move(mesh); r.status="3D X-ray ready.";
     logging::write(logging::Level::info,logging::Channel::graphics,"Slam X-ray: 3D pipeline ready.");
 }
@@ -227,6 +284,14 @@ void render_slam_mesh(ID3D12Device* device,ID3D12GraphicsCommandList* commands,D
         const auto focal=1/std::tan(view.vertical_fov*3.14159265f/360);
         constants.projection={focal*static_cast<float>(height)/static_cast<float>(width),focal,.05f,1000};
         constants.colors=appearance.colors;
+        const auto& fractures=normal_play ? value.normal_xray_events.fractures_at_ms : value.visual_events.fractures_at_ms;
+        for (std::size_t part=0;part<slam::render_bone_count;++part) {
+            if (!r.fracture_used[part] || !fractures[part] || fractures[part]==r.fracture_cached_at[part]) continue;
+            const auto plane=slam::make_fracture_plane(r.mesh->rig.inverse_bind[part],r.fracture_low[part],r.fracture_high[part],
+                slam::varied_fracture_location(static_cast<unsigned>(part),fractures[part]));
+            if (plane) {r.fracture_planes[part]=*plane; r.fracture_cached_at[part]=fractures[part];}
+        }
+        constants.damage=appearance.damage; constants.fracture_planes=r.fracture_planes;
         void* destination{}; const D3D12_RANGE empty{};
         check(frame.constants->Map(0,&empty,&destination),"Cannot update X-ray pose");
         std::memcpy(destination,&constants,sizeof(constants)); frame.constants->Unmap(0,nullptr);

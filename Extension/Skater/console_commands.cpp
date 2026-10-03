@@ -5,8 +5,8 @@
 #include <format>
 namespace dingosdk::console {
 void register_movement_commands(Commands &registry) {
-    auto slam_action = argument("start|retry|stop|dismiss|status", Type::text, true);
-    slam_action.choices = {"start", "retry", "stop", "dismiss", "status"};
+    auto slam_action = argument("start|retry|bail|stop|dismiss|status", Type::text, true);
+    slam_action.choices = {"start", "retry", "bail", "stop", "dismiss", "status"};
     auto slam_entry = action("slam", "Offline Slam Challenge controls and physics telemetry", Group::movement, {slam_action});
     slam_entry.run = [](const Model &, const Values &args, const Output &out) {
         const auto operation = args.empty() ? std::string("status") : std::get<std::string>(args[0]);
@@ -16,8 +16,11 @@ void register_movement_commands(Commands &registry) {
                 value.result.points, value.result.impacts, value.result.fractures, value.result.detail));
             out(std::format("{} Samples: {}, rejected: {}, contacts: {}, physics state: {}.",
                 value.availability, value.samples, value.dropped, value.contacts, value.physics_state));
+            out(std::format("{} Manual bails queued: {}, selected: {}, animation published: {}.",
+                value.bail_status,value.manual_bails_queued,value.manual_bails_selected,value.manual_bails_published));
         } else {
-            const auto request = operation == "stop" ? slam::Action::stop : operation == "dismiss" ? slam::Action::dismiss : slam::Action::start;
+            const auto request = operation == "stop" ? slam::Action::stop : operation == "dismiss" ? slam::Action::dismiss :
+                operation=="bail" ? slam::Action::bail : slam::Action::start;
             out(slam::request(request) ? "Slam control queued." : "A Slam control is already queued.");
         }
     };

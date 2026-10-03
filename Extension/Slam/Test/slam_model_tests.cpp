@@ -327,6 +327,21 @@ void raster_camera_input() {
         camera.world[12]==-17 && camera.world[13]==2 && camera.world[14]==45 && camera.world[15]==1 && camera.world[3]==0,
         "Raster camera keeps native placement and FOV while cleaning metadata lanes");
     const auto saved=camera;
+    auto moved=input;
+    RenderCamera impact;
+    check(offset_render_camera(moved,{.02f,-.01f,-.025f},.008f,.94f,impact) &&
+        std::abs(impact.vertical_fov-61.1f)<.001f && std::abs(impact.world[12]+16.98f)<.001f,
+        "A bounded render-view copy supplies the same impacted camera to scene and skeleton");
+    for (std::size_t i=0;i<input.size();++i) {
+        const bool xyz=i>=0x40 && i<0x80 && (i-0x40)%16<12;
+        const bool fov_byte=i>=0x104 && i<0x108;
+        check(xyz || fov_byte || moved[i]==input[i],"Camera response preserves native metadata and all unrelated render-view fields");
+    }
+    const auto unchanged=moved;
+    check(!offset_render_camera(moved,{1,0,0},.008f,.94f,impact) && moved==unchanged,
+        "An out-of-bounds response cannot partially modify the view copy");
+    check(!offset_render_camera(moved,{},std::numeric_limits<float>::quiet_NaN(),.94f,impact) && moved==unchanged,
+        "A non-finite camera response is rejected before any modification");
     world[4]=1; // Individually unit-length axes must also be orthogonal.
     world[5]=0;
     std::memcpy(input.data()+0x40,world.data(),sizeof(world));
@@ -341,6 +356,30 @@ void raster_camera_input() {
     const float invalid=0;
     std::memcpy(input.data()+0x104,&invalid,sizeof(invalid));
     check(!decode_render_camera(input,camera),"Invalid raster FOV cannot replace a valid camera");
+}
+void varied_fracture_planes() {
+    const auto first=varied_fracture_location(277,1000);
+    check(first==varied_fracture_location(277,1000),"A fracture keeps its chosen location across frames and repeated contacts");
+    check(first!=varied_fracture_location(277,2000) && first!=varied_fracture_location(102,1000),
+        "Another fall or another bone can choose a different fracture location and angle");
+    float smallest=1,largest=0;
+    for (unsigned i=0;i<256;++i) {
+        const auto location=varied_fracture_location(i,1000+i*51);
+        check(location.fraction>=.1f && location.fraction<=.9f && std::abs(location.tilt_a)<=.18f && std::abs(location.tilt_b)<=.18f,
+            "Random fractures stay inside the bone and use bounded cut angles");
+        smallest=std::min(smallest,location.fraction); largest=std::max(largest,location.fraction);
+    }
+    check(smallest<.2f && largest>.8f,"Fracture variation reaches both ends of the usable bone length rather than staying near its midpoint");
+    auto inverse=identity_pose;
+    inverse[0]=0; inverse[2]=-1; inverse[8]=1; inverse[10]=0; inverse[12]=-2; inverse[13]=3; inverse[14]=1;
+    const Vec3 point{4,1,2};
+    const auto local=model_to_world(inverse,point);
+    const Vec3 low{local[0]-2*first.fraction,local[1]-.1f,local[2]-.05f};
+    const Vec3 high{local[0]+2*(1-first.fraction),local[1]+.1f,local[2]+.05f};
+    const auto plane=make_fracture_plane(inverse,low,high,first);
+    check(plane && std::abs((*plane)[0]*point[0]+(*plane)[1]*point[1]+(*plane)[2]*point[2]+(*plane)[3])<.00001f,
+        "The randomized cut passes through the selected bone location after rotated bind-space conversion");
+    check(!make_fracture_plane(inverse,{}, {},first),"Degenerate bone bounds cannot create a clipping plane");
 }
 void render_root_timing() {
     MeshPose native{}; native.skin.fill(identity_pose);
@@ -542,8 +581,55 @@ void saved_personal_bests() {
         "Malformed and oversized best records are rejected");
 }
 }
+void personal_best_transactions() {
+    using namespace dingosdk::slam;
+    std::map<std::string,std::string,std::less<>> profile;
+    unsigned reads{},writes{}; bool can_save=false;
+    const BestBook::Read read=[&](std::string_view key)->std::optional<std::string> {
+        ++reads; const auto found=profile.find(key);
+        return found==profile.end() ? std::nullopt : std::optional(found->second);
+    };
+    const BestBook::Write write=[&](std::string_view key,std::string_view document) {
+        ++writes; if (!can_save) return false;
+        profile[std::string(key)]=document; return true;
+    };
+    constexpr std::string_view map="levels/test/transactions";
+    Config config; config.kind=ChallengeKind::score; config.target=500;
+    profile[personal_best_key(map,config)]=encode_personal_best(map,config,{400,400,3,1});
+    Result result; result.config=config; result.phase=Phase::results;
+    result.points=600; result.target_progress=600; result.target_met=true;
+    BestBook book;
+    const auto recorded=book.record(1,map,result,read,write);
+    check(recorded && recorded->improved && !recorded->saved && recorded->best.score==600 && recorded->best.attempts==4 && recorded->best.successes==2,
+        "A completed result merges its stored best once and survives a failed profile write");
+    const auto count=writes;
+    check(!book.record(1,map,result,read,write) && writes==count && book.lookup(map,config,read).best.attempts==4,
+        "Repeated publication of the same attempt cannot write or count it twice");
+    result.cancelled=true;
+    check(!book.record(2,map,result,read,write) && writes==count,"Cancelled results never enter the best store");
+    check(!book.flush(write) && book.lookup(map,config,read).best.attempts==4,"Failed save retries do not count more attempts");
+    can_save=true;
+    check(book.flush(write) && book.lookup(map,config,read).saved,"A later successful write clears the unsaved state");
+    BestBook restored;
+    check(restored.lookup(map,config,read).best==recorded->best,"A new session restores the completed best and counters from profile text");
+    result.cancelled=false; result.points=1; result.target_progress=1; result.target_met=false;
+    const auto lower=book.record(2,map,result,read,write);
+    check(lower && !lower->improved && lower->saved && lower->best.score==600 && lower->best.attempts==5 && lower->best.successes==2,
+        "A lower completed result persists its attempt count without replacing the record");
+    auto different=config; different.target=700;
+    check(book.lookup(map,different,read).best.attempts==0 && book.lookup("levels/test/elsewhere",config,read).best.attempts==0,
+        "Changing maps or targets selects a separate personal best");
+    result.config=different;
+    check(book.record(3,map,result,read,write)->best.attempts==1 && book.lookup(map,config,read).best.attempts==5,
+        "A new challenge's completion does not alter the previous challenge's counters");
+    const auto reads_before=reads;
+    (void)book.lookup(map,config,read);
+    check(reads==reads_before,"Recently recorded and unsaved bests use the session cache");
+}
 int main() {
     lifecycle(); contact_scoring(); same_region(); invalidation(); free_fall_and_rest(); recovery_and_timeout(); native_regressions(); camera_timing(); rendered_pose(); mesh_skinning(); rendered_world_skinning(); raster_camera_input(); render_root_timing(); mesh_streams(); individual_bone_hits(); pose_publication_order(); challenge_progression(); saved_personal_bests();
+    personal_best_transactions();
+    varied_fracture_planes();
     if (failures) return 1;
     std::cout << "Slam Challenge scoring and lifecycle checks passed.\n";
 }

@@ -43,6 +43,18 @@ struct RenderCamera {
 // Supported native CurrentRenderView input (320 bytes), not the CPU camera
 // entity. Fourth matrix lanes contain metadata and are cleaned for drawing.
 bool decode_render_camera(std::span<const std::byte> input, RenderCamera& output) noexcept;
+// Edits a caller-owned view copy, preserving native SIMD metadata lanes.
+// The game's camera object and original render-view inputs remain untouched.
+bool offset_render_camera(std::span<std::byte> input,const Vec3& translation,float roll,float fov_scale,
+    RenderCamera& output) noexcept;
+struct FractureLocation {
+    float fraction=.53f,tilt_a{},tilt_b{};
+    bool operator==(const FractureLocation&) const = default;
+};
+// Chooses 10%-90% along the bone; stable for its first fracture timestamp.
+FractureLocation varied_fracture_location(unsigned bone,std::uint64_t fracture_ms) noexcept;
+std::optional<std::array<float,4>> make_fracture_plane(const PoseMatrix& inverse_bind,
+    const Vec3& low,const Vec3& high,const FractureLocation& location) noexcept;
 struct MeshPose {
     std::array<PoseMatrix,render_bone_count> skin;
     std::uint64_t at_ms{};

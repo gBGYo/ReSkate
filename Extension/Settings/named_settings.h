@@ -18,6 +18,12 @@ std::string change_named_setting(std::string_view name, std::string_view value, 
 // any such change made before a session is put back when it starts.
 std::string player_change_named_setting(std::string_view name, std::string_view value, bool restore);
 std::string restore_named_settings();
+// Temporary offline impact multiplier. Client thread only; preserves the
+// player's existing override and yields to external changes/object reuse.
+bool begin_impact_time_scale(float factor);
+bool update_impact_time_scale(float factor);
+bool restore_impact_time_scale();
+bool impact_time_scale_active();
 // Every engine setting name known so far: listed from the engine's settings
 // registry this session or remembered from earlier ones. Any thread.
 std::vector<std::string> named_setting_names();

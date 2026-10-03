@@ -2,10 +2,16 @@
 #include "slam_telemetry.h"
 #include "slam_pose.h"
 #include "slam_pose_publication.h"
+#include "slam_audio.h"
 #include "Extension/Multiplayer/Remote/native_pose_layout.h"
 #include "Extension/Multiplayer/Remote/native_skater.h"
 #include "Extension/Skater/no_bail.h"
+#include "Extension/Skater/manual_bail_request.h"
 #include "Extension/Profile/local_profile_runtime.h"
+#include "Extension/Settings/named_settings.h"
+#include "Extension/UI/Overlay/overlay.h"
+#include "Extension/UI/Overlay/input_capture.h"
+#include "Engine/Core/Platform/launcher_support.h"
 #include "Engine/Core/Platform/memory.h"
 #include "Engine/Core/Log/logging.h"
 #include "Engine/Core/Hooks/hooks.h"
@@ -26,6 +32,7 @@ namespace dingosdk::slam {
 namespace {
 namespace layout = game::build::v20260929::slam;
 struct Watch { LocalBailOwner owner; std::uintptr_t client{}, component{}, holder{}; std::uint64_t until{}; };
+struct CompletedAttempt { std::uint64_t serial{}; std::string map; Result result; };
 struct State {
     std::mutex mutex;
     std::atomic<std::uintptr_t> rig{}, selector{};
@@ -56,10 +63,64 @@ struct State {
     bool cache_hook_checked{},cache_hook_ok{},cache_logged{};
     std::uint32_t (*original_render_cache)(std::uintptr_t,std::uintptr_t){};
     bool view_hook_checked{},view_hook_ok{},view_logged{};
+    std::atomic<bool> camera_contracts_ok{};
     void (*original_render_view)(std::uintptr_t,std::uintptr_t,std::uintptr_t,std::uint8_t){};
     std::uint64_t visuals_save_at{};
+    std::uint64_t controls_save_at{};
+    std::uint64_t explicit_bail_until{};
+    std::uint64_t manual_bail_at{};
+    KeyboardPressLatch bail_key;
+    ControllerComboLatch bail_controller;
+    std::uint64_t config_save_at{}, best_retry_at{}, attempt_serial{};
+    BestBook best_book;
+    std::vector<CompletedAttempt> completed_attempts;
+    std::string attempt_map, selected_best_identity;
+    SlowMotionPulse slow_pulse;
+    ImpactCameraPulse camera_pulse;
+    CameraImpulse camera_impact;
+    CameraMotion previous_camera_motion;
+    std::uintptr_t previous_effect_camera{};
+    std::uint64_t camera_logged_impulse{};
+    std::atomic<bool> effects_suspended{}, effects_cancel_requested{};
+    std::string time_status="Impact slow motion ready.";
 };
 State& state() { static auto* s = new State; return *s; }
+bool game_window_focused() {
+    DWORD process{};
+    GetWindowThreadProcessId(GetForegroundWindow(),&process);
+    return process==GetCurrentProcessId();
+}
+bool gameplay_focused() {return game_window_focused() && overlay::keyboard_shortcuts_allowed();}
+TimePulseFrame update_time_effect(const VisualOptions& options,const VisualEvents& events,bool allowed) {
+    auto& s=state();
+    auto pulse=s.slow_pulse.step(options,events,GetTickCount64(),allowed);
+    if (pulse.started) {
+        if (impact_time_scale_active() && !restore_impact_time_scale()) {
+            s.slow_pulse.cancel(); s.time_status="Waiting to restore the previous game speed."; return {};
+        }
+        if (!begin_impact_time_scale(pulse.factor)) {
+            s.slow_pulse.cancel(); s.time_status="Impact slow motion is unavailable for the current game settings.";
+            logging::write(logging::Level::warning,logging::Channel::skater,s.time_status);
+            return {};
+        }
+        s.time_status="Impact slow motion active.";
+        logging::log(logging::Level::info,logging::Channel::skater,
+            "Impact slow motion applied: factor {:.2f}, duration {:.2f}s, bone {}, severity {:.1f}, fracture={}." ,
+            pulse.factor,options.slow_motion_seconds,events.latest_bone,events.latest_severity,events.latest_fracture);
+    } else if (pulse.active && !update_impact_time_scale(pulse.factor)) {
+        s.slow_pulse.cancel();
+        if (impact_time_scale_active())
+            s.time_status=restore_impact_time_scale() ? "Previous game speed restored." : "Waiting to restore the previous game speed.";
+        else s.time_status="A newer game-speed setting was preserved.";
+        return {};
+    } else if (!pulse.active && impact_time_scale_active()) {
+        if (restore_impact_time_scale()) {
+            s.time_status="Previous game speed restored.";
+            logging::write(logging::Level::info,logging::Channel::skater,"Impact slow motion restored the prior game speed.");
+        } else s.time_status="Waiting to restore the previous game speed.";
+    }
+    return pulse;
+}
 template<class T> bool read(std::uintptr_t address, T& value) { return memory::peek(address, value); }
 std::uintptr_t pointer(std::uintptr_t address) {
     std::uintptr_t p{};
@@ -270,10 +331,74 @@ bool install_cache_hook(std::uintptr_t base) {
     s.original_render_cache=reinterpret_cast<decltype(s.original_render_cache)>(original);
     return hook_enable(target)==HookOk;
 }
+struct alignas(16) ImpactViews {
+    std::array<std::byte,320> current{},previous{};
+    std::array<std::byte,320> source_current{};
+    RenderCamera camera;
+    LocalBailOwner owner;
+};
+std::optional<ImpactViews> impact_views(std::uintptr_t current_view,std::uintptr_t previous_view) {
+    auto& s=state();
+    if (!s.camera_contracts_ok.load(std::memory_order_acquire) || !s.draw_active.load(std::memory_order_acquire) || s.effects_suspended.load(std::memory_order_acquire) ||
+        !gameplay_focused() || current_view<0x10050 || previous_view<0x10050) return {};
+    Watch watch; CameraImpulse impulse; CameraMotion previous;
+    {
+        std::lock_guard lock(s.mutex);
+        watch=s.watch; impulse=s.camera_impact;
+        if (s.published.first_person) return {};
+    }
+    if (GetTickCount64()>=watch.until) return {};
+    auto camera=latest_game_view();
+    // Freecam and first person own their camera. This response only layers
+    // over the ordinary local gameplay view, never over those features.
+    if (!camera || !refresh_game_view(watch.owner.base,*camera) ||
+        pointer(camera->camera)!=watch.owner.base+game::build::v20260929::engine::camera_vtable) return {};
+    std::uint32_t kind{}; std::uint8_t projection{};
+    // Live main perspective input uses projection kind 0; kind 3 is a
+    // separate projection branch. Preserve all projection-specific fields.
+    if (!read(current_view-0x50+0x18,kind) || kind || !read(current_view+0x100,projection) || projection!=0) return {};
+    const auto motion=sample_camera_impulse(impulse,GetTickCount64());
+    {
+        std::lock_guard lock(s.mutex);
+        if (s.previous_effect_camera==camera->camera) previous=s.previous_camera_motion;
+        if (!motion.active && !previous.active) return {};
+    }
+    ImpactViews views;
+    std::array<std::byte,320> current_check{},previous_check{};
+    if (!read(current_view,views.current) || !read(previous_view,views.previous)) return {};
+    RenderCamera unmodified,old;
+    if (!decode_render_camera(views.current,unmodified) || !decode_render_camera(views.previous,old)) return {};
+    const Vec3 delta{unmodified.world[12]-camera->world[12],unmodified.world[13]-camera->world[13],unmodified.world[14]-camera->world[14]};
+    if (!finite(delta) || length(delta)>10 || !resolve_local_bail_owner(watch.client,watch.owner.entity,views.owner) || views.owner!=watch.owner ||
+        !read(current_view,current_check) || current_check!=views.current || !read(previous_view,previous_check) || previous_check!=views.previous) return {};
+    views.source_current=views.current;
+    if (!offset_render_camera(views.current,motion.translation,motion.roll,motion.fov_scale,views.camera) ||
+        !offset_render_camera(views.previous,previous.translation,previous.roll,previous.fov_scale,old)) return {};
+    {
+        std::lock_guard lock(s.mutex);
+        if (s.watch.owner!=watch.owner || GetTickCount64()>=s.watch.until) return {};
+        s.previous_effect_camera=camera->camera; s.previous_camera_motion=motion;
+        if (motion.active && s.camera_logged_impulse!=impulse.started_ms) {
+            s.camera_logged_impulse=impulse.started_ms;
+            logging::log(logging::Level::info,logging::Channel::skater,
+                "Impact camera submitted: strength {:.2f}, native FOV {:.2f} -> {:.2f} degrees.",
+                impulse.strength,unmodified.vertical_fov,views.camera.vertical_fov);
+        }
+    }
+    return views;
+}
 void render_view_hook(std::uintptr_t blackboard,std::uintptr_t current_view,
     std::uintptr_t previous_view,std::uint8_t jitter) {
     auto& s=state();
-    s.original_render_view(blackboard,current_view,previous_view,jitter);
+    std::optional<ImpactViews> impact;
+    const auto incoming_error=GetLastError();
+    try {impact=impact_views(current_view,previous_view);} catch (...) {}
+    SetLastError(incoming_error);
+    // Native setter copies all 320 input bytes into its blackboard and
+    // derives matrices synchronously. These scoped copies cannot persist
+    // an override in the game's camera or mutate the caller's native view.
+    s.original_render_view(blackboard,impact ? reinterpret_cast<std::uintptr_t>(impact->current.data()) : current_view,
+        impact ? reinterpret_cast<std::uintptr_t>(impact->previous.data()) : previous_view,jitter);
     struct PreserveError {DWORD value=GetLastError(); ~PreserveError() {SetLastError(value);}} preserve_error;
     if (!s.draw_active.load(std::memory_order_acquire)) return;
     try {
@@ -309,6 +434,10 @@ void render_view_hook(std::uintptr_t blackboard,std::uintptr_t current_view,
             !read(current_view-0x50+0x18,kind) || kind) return;
         LocalBailOwner after;
         if (!resolve_local_bail_owner(watch.client,watch.owner.entity,after) || after!=owner) return;
+        if (impact) {
+            if (impact->owner!=owner || input!=impact->source_current) return;
+            render_camera=impact->camera;
+        }
         // Keep the producer lease. A render-camera update cannot keep a
         // stopped or hidden character's old palette alive indefinitely.
         next->at_ms=producer->at_ms; next->sequence=producer->sequence;
@@ -328,6 +457,10 @@ void render_view_hook(std::uintptr_t blackboard,std::uintptr_t current_view,
 bool install_view_hook(std::uintptr_t base) {
     auto& s=state(); std::array<unsigned char,32> bytes{};
     if (!read(base+layout::render_view.rva,bytes) || bytes!=layout::render_view.bytes) return false;
+    bool camera_ok=true;
+    for (const auto& contract : {layout::render_view_copy,layout::render_view_constructor})
+        if (!read(base+contract.rva,bytes) || bytes!=contract.bytes) camera_ok=false;
+    s.camera_contracts_ok.store(camera_ok,std::memory_order_release);
     void* original{};
     auto target=reinterpret_cast<void*>(base+layout::render_view.rva);
     if (hook_prepare(target,reinterpret_cast<void*>(&render_view_hook),&original)!=HookOk) return false;
@@ -535,6 +668,30 @@ bool set_visual_options(const VisualOptions& options) noexcept {
         return true;
     } catch (...) {return false;}
 }
+bool set_challenge_config(const Config& config) noexcept {
+    if (!valid_config(config)) return false;
+    try {
+        auto& s=state(); std::lock_guard lock(s.mutex);
+        if (!s.published.challenge_options_ready) return false;
+        if (s.published.selected_config==config) return true;
+        s.published.selected_config=config;
+        s.selected_best_identity.clear();
+        s.config_save_at=GetTickCount64()+350;
+        s.published.challenge_save_status="Saving challenge settings...";
+        return true;
+    } catch (...) {return false;}
+}
+bool set_bail_controls(const BailControls& controls) noexcept {
+    if (!valid_bail_controls(controls)) return false;
+    try {
+        auto& s=state(); std::lock_guard lock(s.mutex);
+        if (!s.published.bail_controls_ready) return false;
+        s.published.bail_controls=controls;
+        s.controls_save_at=GetTickCount64()+350;
+        s.published.bail_controls_save_status="Saving bail controls...";
+        return true;
+    } catch (...) {return false;}
+}
 bool hud_visible() noexcept { return state().visible.load(std::memory_order_acquire); }
 bool visuals_visible() noexcept { return state().draw_active.load(std::memory_order_acquire); }
 void tick(std::uintptr_t base, std::uintptr_t client, std::uintptr_t entity, bool ready,
@@ -569,10 +726,85 @@ void tick(std::uintptr_t base, std::uintptr_t client, std::uintptr_t entity, boo
             s.view_hook_ok=install_view_hook(base);
             logging::log(logging::Level::info,logging::Channel::graphics,"X-ray raster view observer: {}.",s.view_hook_ok ? "ready" : "unavailable");
         }
-        std::lock_guard lock(s.mutex);
+        std::unique_lock lock(s.mutex);
         s.published.image_base = base;
         s.published.first_person=first_person;
+        constexpr std::string_view config_key="Slam.Challenge.v1";
         constexpr std::string_view visuals_key="Slam.Visuals.v1";
+        constexpr std::string_view controls_key="Slam.Controls.v1";
+        const BestBook::Read read_best=[](std::string_view key)->std::optional<std::string> {
+            const auto saved=profile_runtime::local_value(key);
+            return saved && saved->is_string() ? std::optional(saved->string()) : std::nullopt;
+        };
+        const BestBook::Write write_best=[](std::string_view key,std::string_view document) {
+            const std::string encoded(document);
+            profile_runtime::set_local_values({{std::string(key),encoded}});
+            const auto saved=profile_runtime::local_value(key);
+            return saved && saved->is_string() && saved->string()==encoded;
+        };
+        if (owned && !s.published.challenge_options_ready) {
+            if (const auto saved=read_best(config_key)) {
+                if (const auto config=decode_config(*saved)) {
+                    s.published.selected_config=*config;
+                    s.published.challenge_save_status="Saved challenge settings restored.";
+                } else s.published.challenge_save_status="Saved challenge settings could not be read; using defaults.";
+            }
+            s.published.challenge_options_ready=true;
+        }
+        if (owned && !s.published.bail_controls_ready) {
+            if (const auto saved=read_best(controls_key)) {
+                if (const auto controls=decode_bail_controls(*saved)) {
+                    s.published.bail_controls=*controls;
+                    s.published.bail_controls_save_status="Saved bail controls restored.";
+                } else s.published.bail_controls_save_status="Saved bail controls could not be read; using defaults.";
+            }
+            s.published.bail_controls_ready=true;
+        }
+        // The physics hook only queues an immutable completed result. Drain
+        // it here before processing a new start or a map/owner transition.
+        if (offline && ready) {
+            for (const auto& attempt : s.completed_attempts) {
+                const auto recorded=s.best_book.record(attempt.serial,attempt.map,attempt.result,read_best,write_best);
+                if (!recorded) continue;
+                s.published.result_best=recorded->best;
+                s.published.result_best_ready=true;
+                s.published.new_best=recorded->improved;
+                s.selected_best_identity.clear();
+                if (!recorded->saved) s.best_retry_at=GetTickCount64()+5000;
+                s.published.best_save_status=s.best_retry_at ? "Personal best kept for this session; retrying save." : "Personal best saved.";
+                logging::log(logging::Level::info,logging::Channel::skater,
+                    "Slam result recorded: attempt {}, {}, target {:.2f}, {} points, best {} points, attempts {}, saved={}. {}",
+                    attempt.serial,challenge_name(attempt.result.config.kind),attempt.result.config.target,attempt.result.points,
+                    recorded->best.score,recorded->best.attempts,recorded->saved,s.published.best_save_status);
+            }
+            s.completed_attempts.clear();
+            if (s.controls_save_at && GetTickCount64()>=s.controls_save_at) {
+                s.controls_save_at=0;
+                const bool saved=write_best(controls_key,encode_bail_controls(s.published.bail_controls));
+                s.published.bail_controls_save_status=saved ? "Bail controls saved." : "Could not save bail controls; changes apply for this session.";
+            }
+            if (s.best_retry_at && GetTickCount64()>=s.best_retry_at) {
+                const bool saved=s.best_book.flush(write_best);
+                s.best_retry_at=saved ? 0 : GetTickCount64()+5000;
+                s.published.best_save_status=saved ? "Personal best saved." : "Personal best kept for this session; retrying save.";
+            }
+            if (s.config_save_at && GetTickCount64()>=s.config_save_at) {
+                s.config_save_at=0;
+                const bool saved=write_best(config_key,encode_config(s.published.selected_config));
+                s.published.challenge_save_status=saved ? "Challenge settings saved." : "Could not save challenge settings; changes apply for this session.";
+            }
+        }
+        if (owned && !map.empty() && map.size()<=512 && map.find('\0')==std::string_view::npos) {
+            const auto identity=std::string(map)+"\n"+encode_config(s.published.selected_config);
+            if (identity!=s.selected_best_identity) {
+                s.published.selected_best=s.best_book.lookup(map,s.published.selected_config,read_best).best;
+                s.selected_best_identity=identity;
+                logging::log(logging::Level::info,logging::Channel::skater,
+                    "Slam challenge selected: {}, target {:.2f}, best {} points, {} completed attempts.",
+                    challenge_name(s.published.selected_config.kind),s.published.selected_config.target,
+                    s.published.selected_best.score,s.published.selected_best.attempts);
+            }
+        }
         if (owned && !s.published.visual_options_ready) {
             if (const auto saved=profile_runtime::local_value(visuals_key)) {
                 const auto decoded=saved->is_string() ? decode_visual_options(saved->string()) : std::nullopt;
@@ -630,23 +862,77 @@ void tick(std::uintptr_t base, std::uintptr_t client, std::uintptr_t entity, boo
         s.map = map;
         s.published.available = !issue && s.last.valid && GetTickCount64() - s.last_at < 250;
         if (issue) s.published.availability = issue;
+        bool explicit_bail=false;
         if (s.pending) {
             const auto action = *s.pending;
             s.pending.reset();
-            if (action == Action::dismiss) { s.challenge.cancel("Attempt dismissed."); s.published.visible = false; }
-            else if (action == Action::stop) s.challenge.cancel("Attempt stopped.");
+            if (action == Action::dismiss) { s.challenge.cancel("Attempt dismissed."); s.published.visible = false; cancel_manual_bail(); }
+            else if (action == Action::stop) {s.challenge.cancel("Attempt stopped."); cancel_manual_bail();}
+            else if (action == Action::bail) explicit_bail=true;
             else {
                 s.published.visible = true;
-                if (s.published.available && s.challenge.begin(s.last)) {
+                if (s.published.available && s.published.challenge_options_ready &&
+                    !map.empty() && map.size()<=512 && map.find('\0')==std::string_view::npos &&
+                    s.challenge.begin(s.last,s.published.selected_config)) {
+                    ++s.attempt_serial; s.attempt_map=map;
+                    s.published.result_best_ready=false; s.published.new_best=false;
                     s.published.xray_context_valid=true;
                     s.published.visual_events.reset();
-                    logging::write(logging::Level::info, logging::Channel::skater, "Slam Challenge attempt started.");
+                    logging::log(logging::Level::info, logging::Channel::skater,"Slam attempt {} started: {}, target {:.2f} {}.",
+                        s.attempt_serial,challenge_name(s.published.selected_config.kind),s.published.selected_config.target,
+                        challenge_unit(s.published.selected_config.kind));
                 } else {
                     s.published.availability = s.last.bailed ? "Recover and get back on your board before retrying." :
                         issue ? issue : "Waiting for a fresh physics sample.";
                 }
             }
         }
+        const auto& controls=s.published.bail_controls;
+        const auto keys=launcher::overlay_keys();
+        s.published.bail_key_conflict=controls.key && (controls.key==keys.menu || controls.key==keys.console);
+        const auto bindings=local_profile_controller_bindings();
+        s.published.bail_controller_conflict=overlapping_combos(controls.controller_combo,bindings.noclip_combo) ||
+            overlapping_combos(controls.controller_combo,bindings.forward_velocity_combo) ||
+            overlapping_combos(controls.controller_combo,bindings.up_velocity_combo);
+        const bool bail_mode=s.published.bail_controls_ready && controls.enabled &&
+            (s.challenge.running() || s.published.visuals.normal_play);
+        const char* bail_issue=!bail_mode ? "Start an attempt or enable normal-play X-ray and Manual bail." :
+            issue ? issue : changed ? "Waiting for the current skater and map." :
+            first_person ? "Turn off First person before using Manual bail." :
+            s.effects_suspended.load(std::memory_order_acquire) ? "Waiting for loading to finish." :
+            !s.last.valid || GetTickCount64()-s.last_at>=250 ? "Waiting for a fresh physics sample." :
+            s.last.bailed ? "Recover before bailing again." :
+            !manual_bail_state(s.published.physics_state) ? "Wait for normal skating or walking before bailing." : nullptr;
+        s.published.bail_available=!bail_issue;
+        s.published.bail_status=bail_issue ? bail_issue : "Manual bail is ready.";
+        const bool window_focused=game_window_focused();
+        const bool shortcuts=window_focused && overlay::keyboard_shortcuts_allowed();
+        bool key_down{};
+        {
+            overlay::detail::OverlayInputAccess access;
+            if (controls.key) key_down=(GetAsyncKeyState(static_cast<int>(controls.key))&0x8000)!=0;
+        }
+        ControllerInput controller;
+        DingoSDKOverlayReadControllerInput(&controller);
+        const bool key_pressed=s.bail_key.update(controls.key,key_down,
+            !shortcuts || bail_issue || s.published.bail_key_conflict);
+        const bool pad_pressed=s.bail_controller.update(controls.controller_combo,controller,
+            !shortcuts || bail_issue || !bindings.available || s.published.bail_controller_conflict);
+        const bool bail_context=bail_mode && !issue && !changed && !first_person &&
+            !s.effects_suspended.load(std::memory_order_acquire);
+        if (!bail_context || !window_focused || (!shortcuts && GetTickCount64()>=s.explicit_bail_until)) cancel_manual_bail();
+        if (explicit_bail || key_pressed || pad_pressed) {
+            const bool accepted=!bail_issue && window_focused && queue_manual_bail(client,entity);
+            if (accepted && explicit_bail) s.explicit_bail_until=GetTickCount64()+500;
+            s.published.bail_status=accepted ? "Manual bail queued for native physics and animation." :
+                bail_issue ? bail_issue : "Manual bail could not be queued; keep the game focused and try again.";
+            logging::log(accepted ? logging::Level::info : logging::Level::warning,logging::Channel::skater,"{}",s.published.bail_status);
+            if (!accepted) overlay::notify(overlay::NoticeLevel::warning,"Manual bail",s.published.bail_status);
+        }
+        const auto manual=manual_bail_status();
+        s.published.manual_bails_queued=manual.queued;
+        s.published.manual_bails_selected=manual.selected;
+        s.published.manual_bails_published=manual.published;
         if ((s.published.visible || s.published.visuals.normal_play) && !s.mesh_started && owned) {
             s.mesh_started=true;
             s.published.mesh_status="Loading Dem Bones from the installed game...";
@@ -678,11 +964,46 @@ void tick(std::uintptr_t base, std::uintptr_t client, std::uintptr_t entity, boo
             s.challenge.cancel("Attempt cancelled: physics telemetry stopped.");
         if (GetTickCount64()-s.last_at>500) s.normal_xray.reset();
         publish_result(s);
+        const auto effects_options=s.published.visuals;
+        const auto effects_events=effects_options.normal_play ? s.published.normal_xray_events : s.published.visual_events;
+        const bool effects_allowed=!visual_issue && !s.effects_suspended.load(std::memory_order_acquire) &&
+            !s.effects_cancel_requested.exchange(false,std::memory_order_acq_rel) && GetTickCount64()-s.last_at<250 &&
+            (effects_options.normal_play || (s.published.visible && s.published.xray_context_valid));
+        const bool camera_allowed=effects_allowed && !first_person && gameplay_focused();
+        s.camera_impact=s.camera_pulse.step(effects_options,effects_events,GetTickCount64(),camera_allowed);
+        if (!camera_allowed) {s.previous_camera_motion={}; s.previous_effect_camera=0;}
+        s.published.impact_camera_available=s.view_hook_ok && s.camera_contracts_ok.load(std::memory_order_acquire);
+        // Native setting listeners can call back into game systems. Invoke
+        // them with no Slam mutex held; presentation only reads the result.
+        lock.unlock();
+        const auto pulse=update_time_effect(effects_options,effects_events,effects_allowed && !first_person && gameplay_focused());
+        const auto audio_status=update_impact_audio(effects_options,effects_events,effects_allowed);
+        lock.lock();
+        s.published.impact_audio_status=audio_status;
+        s.published.slow_motion_active=pulse.active;
+        s.published.slow_motion_factor=pulse.factor;
+        s.published.slow_motion_status=s.time_status;
         if (s.diagnostic != s.published.availability) {
             s.diagnostic = s.published.availability;
             logging::log(logging::Level::info, logging::Channel::skater, "Slam telemetry: {} ({} samples, {} rejected)",
                 s.diagnostic, s.published.samples, s.published.dropped);
         }
+    } catch (...) {
+        cancel_manual_bail();
+        (void)restore_impact_time_scale();
+    }
+}
+void before_level_transition(unsigned next) noexcept {
+    try {
+        auto& s=state();
+        if (next==3 || next==14 || next==22 || next==24 || next==25) {
+            cancel_manual_bail();
+            s.effects_suspended.store(true,std::memory_order_release);
+            s.effects_cancel_requested.store(true,std::memory_order_release);
+            // The settings bridge only writes on its owning game thread. If
+            // this callback runs elsewhere, the next client tick retries it.
+            (void)restore_impact_time_scale();
+        } else if (next==13 || next==21) s.effects_suspended.store(false,std::memory_order_release);
     } catch (...) {}
 }
 void observe_selection(std::uintptr_t selector, std::uint32_t next) noexcept {
@@ -691,6 +1012,17 @@ void observe_selection(std::uintptr_t selector, std::uint32_t next) noexcept {
     try {
         std::lock_guard lock(s.mutex);
         if (selector == s.watch.owner.selector && GetTickCount64() < s.watch.until && next == 300) s.bail_latched = true;
+    } catch (...) {}
+}
+void observe_manual_bail(std::uintptr_t selector) noexcept {
+    auto& s=state();
+    if (!selector || selector!=s.selector.load(std::memory_order_acquire)) return;
+    try {
+        std::lock_guard lock(s.mutex);
+        if (selector==s.watch.owner.selector && GetTickCount64()<s.watch.until) {
+            s.bail_latched=true;
+            s.manual_bail_at=GetTickCount64();
+        }
     } catch (...) {}
 }
 void observe_skeleton(std::uintptr_t rig, float seconds, bool wipeout) noexcept {
@@ -708,9 +1040,12 @@ void observe_skeleton(std::uintptr_t rig, float seconds, bool wipeout) noexcept 
         std::uint32_t selected{};
         if (!read(current.context + 0x1414, selected)) return;
         s.bail_latched = s.bail_latched || wipeout;
-        // A native wipeout is mapped to Offboard (504). Riding again is an
-        // unambiguous recovery; ordinary walking cannot start a bail attempt.
+        // 504 covers walking and falling. A verified walking ground substate
+        // can recover without mounting. Give a published request time to reach
+        // animation before considering that same initial walking pose recovered.
         if (!wipeout && ((selected >= 100 && selected < 300) || (selected >= 400 && selected < 500))) s.bail_latched = false;
+        if (!wipeout && s.bail_latched && GetTickCount64()-s.manual_bail_at>750 &&
+            local_bail_recovered(current)) s.bail_latched=false;
         Frame frame;
         (void)capture(current, seconds, s.bail_latched, frame, s.published);
         ++s.published.samples;
@@ -730,9 +1065,12 @@ void observe_skeleton(std::uintptr_t rig, float seconds, bool wipeout) noexcept 
             if (s.normal_xray.result().impacts>previous_impacts)
                 logging::log(logging::Level::info,logging::Channel::skater,"Normal-play X-ray: {} impacts tracked this fall.",s.normal_xray.result().impacts);
         }
-        if (s.challenge.result().phase == Phase::results && previous_phase != Phase::results)
+        if (s.challenge.result().phase == Phase::results && previous_phase != Phase::results) {
+            if (!s.challenge.result().cancelled && !s.attempt_map.empty())
+                s.completed_attempts.push_back({s.attempt_serial,s.attempt_map,s.challenge.result()});
             logging::log(logging::Level::info, logging::Channel::skater, "Slam Challenge: {} points, {} impacts, {} fractures. {}",
                 s.challenge.result().points, s.challenge.result().impacts, s.challenge.result().fractures, s.challenge.result().detail);
+        }
         publish_result(s);
     } catch (...) {}
 }

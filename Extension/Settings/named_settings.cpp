@@ -2,6 +2,7 @@
 #include "Engine/Core/Console/command_registry.h"
 #include "Engine/Core/Log/logging.h"
 #include "Engine/Game/Settings/multiplayer_settings_lock.h"
+#include "Engine/Game/Settings/transient_float_lease.h"
 #include "Engine/Core/Platform/memory.h"
 #include "Engine/Game/Build/addresses.h"
 #include "Engine/Vfs/content_cache.h"
@@ -74,6 +75,8 @@ struct Runtime {
     // Players' overrides of settings locked in multiplayer, put back when a session starts.
     std::set<std::size_t> player_locked;
     View view; // scratch for observe(), reused so its strings keep their buffers
+    struct TimePulse { std::size_t index{}; TransientFloatLease lease; };
+    std::optional<TimePulse> time_pulse;
 };
 Runtime &runtime() {
     static Runtime value;
@@ -263,7 +266,10 @@ std::optional<Observation> observe_into(std::size_t index, View &v) {
     auto &lease = r.leases[index];
     // Object replacement or an external edit relinquishes ownership. A reset
     // must never overwrite a newer value supplied by the engine or game menu.
-    if (lease && (!o.same_field(lease->applied) || o.value != lease->applied.value))
+    const auto* float_value=std::get_if<float>(&o.value);
+    const bool temporarily_owned=r.time_pulse && r.time_pulse->index==index && float_value &&
+        r.time_pulse->lease.owns({o.manager,o.address,o.type,*float_value});
+    if (lease && !temporarily_owned && (!o.same_field(lease->applied) || o.value != lease->applied.value))
         lease.reset();
     v.override_active = lease.has_value();
     return o;
@@ -336,9 +342,36 @@ std::optional<Scalar> parse(const Observation &o, std::string_view input) {
         },
         o.value);
 }
+std::optional<FloatSettingSample> read_time_pulse(std::size_t index) {
+    const auto current=observe(index);
+    if (!current) return {};
+    const auto* value=std::get_if<float>(&current->value);
+    if (!value) return {};
+    return FloatSettingSample{current->manager,current->address,current->type,*value};
+}
+bool write_time_pulse(std::size_t index,const FloatSettingSample& expected,float value) {
+    const auto checked=observe(index);
+    if (!checked || !std::holds_alternative<float>(checked->value) ||
+        FloatSettingSample{checked->manager,checked->address,checked->type,std::get<float>(checked->value)}!=expected) return false;
+    bool accepted{};
+    if (!native_set(*checked,runtime().models[index].name.c_str(),&value,accepted)) {fault(); return false;}
+    return accepted;
+}
+bool release_time_pulse() {
+    auto& r=runtime();
+    if (!r.time_pulse) return true;
+    const auto index=r.time_pulse->index;
+    const bool restored=r.time_pulse->lease.restore([&] {return read_time_pulse(index);},
+        [&](const FloatSettingSample& expected,float value) {return write_time_pulse(index,expected,value);});
+    if (!r.time_pulse->lease.active()) r.time_pulse.reset();
+    (void)observe(index);
+    return restored;
+}
 std::string change(std::size_t index, std::string_view input, bool restore, bool player = false) {
     auto &r = runtime();
     auto &m = r.models[index];
+    if (r.time_pulse && r.time_pulse->index==index && !release_time_pulse())
+        return "error: " + m.name + ": the impact pulse could not restore its prior value; retry the command.";
     const bool was_owned = r.leases[index].has_value();
     const auto current = observe(index);
     if (!current)
@@ -656,6 +689,7 @@ void refresh_named_settings(bool wanted) {
         r.thread = GetCurrentThreadId();
     if (r.thread != GetCurrentThreadId())
         return;
+    if (r.time_pulse && multiplayer_settings_locked()) (void)release_time_pulse();
     if (r.ready && !r.player_locked.empty() && multiplayer_settings_locked())
         put_back_locked(r);
     if (!r.ready) {
@@ -719,6 +753,7 @@ std::string restore_named_settings() {
     auto &r = runtime();
     if (!r.thread || r.thread != GetCurrentThreadId())
         return "error: Native settings require the game update thread.";
+    if (!release_time_pulse()) return "error: The impact time-scale pulse could not restore its prior value.";
     std::string result;
     for (std::size_t i = 0; i < r.leases.size(); ++i)
         if (r.leases[i]) {
@@ -728,4 +763,32 @@ std::string restore_named_settings() {
         }
     return result.empty() ? "No native session overrides to restore." : result;
 }
+bool begin_impact_time_scale(float factor) {
+    auto& r=runtime();
+    if (!r.ready || r.thread!=GetCurrentThreadId() || multiplayer_settings_locked() || r.time_pulse) return false;
+    for (std::size_t index=0;index<r.models.size();++index) {
+        if (!console::equal(r.models[index].name,"SimulationTime.TimeScale")) continue;
+        r.time_pulse.emplace(); r.time_pulse->index=index;
+        const bool accepted=r.time_pulse->lease.begin(factor,[&] {return read_time_pulse(index);},
+            [&](const FloatSettingSample& expected,float value) {return write_time_pulse(index,expected,value);});
+        if (!r.time_pulse->lease.active()) r.time_pulse.reset();
+        return accepted;
+    }
+    return false;
+}
+bool update_impact_time_scale(float factor) {
+    auto& r=runtime();
+    if (r.thread!=GetCurrentThreadId() || !r.time_pulse) return false;
+    if (multiplayer_settings_locked()) {(void)release_time_pulse(); return false;}
+    const auto index=r.time_pulse->index;
+    const bool accepted=r.time_pulse->lease.update(factor,[&] {return read_time_pulse(index);},
+        [&](const FloatSettingSample& expected,float value) {return write_time_pulse(index,expected,value);});
+    if (!r.time_pulse->lease.active()) r.time_pulse.reset();
+    return accepted;
+}
+bool restore_impact_time_scale() {
+    auto& r=runtime();
+    return r.thread==GetCurrentThreadId() && release_time_pulse();
+}
+bool impact_time_scale_active() {return runtime().time_pulse && runtime().time_pulse->lease.active();}
 } // namespace dingosdk
