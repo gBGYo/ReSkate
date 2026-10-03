@@ -1,4 +1,5 @@
 #include "skate_menu_internal.h"
+#include "Extension/Slam/slam_runtime.h"
 
 #include <array>
 #include <cmath>
@@ -13,6 +14,15 @@ float trailing_width(const char* label) {
 }
 void camera_controls(SkateMenu& menu, const Model& model, const CallbacksV3& callbacks) {
     const auto& debug = model.debug;
+    begin_card(menu,"normal-xray","X-RAY");
+    const auto xray=dingosdk::slam::snapshot();
+    auto visuals=xray.visuals;
+    if (toggle_row(menu,"X-ray in normal play","Show the skeleton without starting a Slam attempt.",visuals.normal_play,xray.visual_options_ready))
+        (void)dingosdk::slam::set_visual_options(visuals);
+    note("Opacity, visibility and impacted bones: Skater > Slam > X-ray. Falls reset automatically after recovery.");
+    if (visuals.normal_play && !xray.normal_xray_available) note(xray.availability.c_str());
+    if (xray.first_person && visuals.normal_play) note("The skeleton is hidden while First person is enabled.");
+    end_card();
     begin_card(menu, "freecam", "FREECAM");
     bool flight = debug.free_camera;
     if (toggle_row(menu, "Freecam", "Detach the camera and explore.", flight,
@@ -133,11 +143,84 @@ void movement_controls(SkateMenu& menu, const Model& model, const CallbacksV3& c
 }
 
 void skater_page(SkateMenu& menu, const Model& model, const CallbacksV3& callbacks) {
-    category_tabs(menu, menu.skater_tab, {"CAMERA", "MOVEMENT"}, "skater-tabs");
+    category_tabs(menu, menu.skater_tab, {"CAMERA", "MOVEMENT", "SLAM"}, "skater-tabs");
     ImGui::PushID(menu.skater_tab);
     ImGui::BeginChild("skater-tab", ImVec2(0, page_body_height(menu)));
     if (menu.skater_tab == 0) camera_controls(menu, model, callbacks);
-    else movement_controls(menu, model, callbacks);
+    else if (menu.skater_tab == 1) movement_controls(menu, model, callbacks);
+    else {
+        const auto value = dingosdk::slam::snapshot();
+        begin_card(menu, "slam-challenge", "SLAM CHALLENGE", "Offline prototype");
+        note("Start an attempt, then take a fall. Impacts, fractures, fall height, airtime and sliding add to your score.");
+        ImGui::Text("%s  |  %llu points", dingosdk::slam::phase_name(value.result.phase),
+            static_cast<unsigned long long>(value.result.points));
+        note(value.result.detail.c_str());
+        if (!value.available || value.bailed) warn(value.availability.c_str());
+        ImGui::BeginDisabled(!value.available || value.bailed);
+        if (ImGui::Button(value.result.phase == dingosdk::slam::Phase::ready ? "Start attempt" : "Retry from here", ImVec2(-FLT_MIN, 0)))
+            (void)dingosdk::slam::request(dingosdk::slam::Action::start);
+        ImGui::EndDisabled();
+        if (value.result.phase == dingosdk::slam::Phase::attempt || value.result.phase == dingosdk::slam::Phase::bailed ||
+            value.result.phase == dingosdk::slam::Phase::settled) {
+            if (ImGui::Button("Stop attempt", ImVec2(-FLT_MIN, 0))) (void)dingosdk::slam::request(dingosdk::slam::Action::stop);
+        }
+        if (value.visible && ImGui::Button("Dismiss HUD", ImVec2(-FLT_MIN, 0))) (void)dingosdk::slam::request(dingosdk::slam::Action::dismiss);
+        note("Recover and get back on your board before retrying. Dem Bones supplies the 3D X-ray skeleton and injury highlights.");
+        note(value.mesh_status.c_str());
+        end_card();
+        begin_card(menu,"slam-xray","X-RAY");
+        auto visuals=value.visuals;
+        bool changed=false;
+        ImGui::BeginDisabled(!value.visual_options_ready);
+        if (toggle_row(menu,"X-ray in normal play","Keep X-ray active without attempts or the Slam score HUD.",visuals.normal_play,value.visual_options_ready)) changed=true;
+        const auto visibility_label=[&](dingosdk::slam::XrayVisibility mode) {
+            return visuals.normal_play && mode==dingosdk::slam::XrayVisibility::attempt ? "Always" : dingosdk::slam::xray_visibility_name(mode);
+        };
+        field(menu,"Show skeleton");
+        ImGui::SetNextItemWidth(-FLT_MIN);
+        if (ImGui::BeginCombo("##slam-xray-visibility",visibility_label(visuals.visibility))) {
+            for (unsigned i=0;i<static_cast<unsigned>(dingosdk::slam::XrayVisibility::count);++i) {
+                const auto mode=static_cast<dingosdk::slam::XrayVisibility>(i);
+                if (ImGui::Selectable(visibility_label(mode),visuals.visibility==mode)) {
+                    visuals.visibility=mode; changed=true;
+                }
+            }
+            ImGui::EndCombo();
+        }
+        ImGui::BeginDisabled(visuals.visibility==dingosdk::slam::XrayVisibility::off);
+        field(menu,"Opacity"); ImGui::SetNextItemWidth(-FLT_MIN);
+        changed|=ImGui::SliderFloat("##slam-xray-opacity",&visuals.opacity,.1f,1.f,"%.2f",ImGuiSliderFlags_AlwaysClamp);
+        if (toggle_row(menu,"Only impacted bones","Reveal the bones involved in hard contacts; hide untouched bones.",visuals.only_impacted,value.visual_options_ready)) changed=true;
+        if (toggle_row(menu,"Reduced effects","Keep steady injury colors and disable impact flashes.",visuals.reduced_effects,value.visual_options_ready)) changed=true;
+        ImGui::BeginDisabled(visuals.reduced_effects);
+        field(menu,"Impact flash strength"); ImGui::SetNextItemWidth(-FLT_MIN);
+        changed|=ImGui::SliderFloat("##slam-xray-flash",&visuals.flash_strength,0.f,1.f,"%.2f",ImGuiSliderFlags_AlwaysClamp);
+        ImGui::EndDisabled();
+        if (visuals.visibility==dingosdk::slam::XrayVisibility::impact) {
+            field(menu,"Visible after impact"); ImGui::SetNextItemWidth(-FLT_MIN);
+            changed|=ImGui::SliderFloat("##slam-xray-seconds",&visuals.impact_duration_s,.3f,5.f,"%.1f seconds",ImGuiSliderFlags_AlwaysClamp);
+        }
+        ImGui::EndDisabled();
+        if (ImGui::Button("Reset X-ray settings",ImVec2(-FLT_MIN,0))) {visuals={}; changed=true;}
+        ImGui::EndDisabled();
+        if (changed) (void)dingosdk::slam::set_visual_options(visuals);
+        if (visuals.normal_play) note("Normal-play X-ray follows every fall and clears injury highlights after recovery. No attempt or reset is needed.");
+        if (value.first_person) note("The skeleton is hidden while First person is enabled.");
+        note("Blue: uninjured. Orange: bruised. Red: fractured. X-ray settings are saved automatically.");
+        if (!value.visual_save_status.empty()) note(value.visual_save_status.c_str());
+        end_card();
+        if (ImGui::TreeNode("Telemetry")) {
+            ImGui::Text("Samples: %llu  |  Rejected: %llu", static_cast<unsigned long long>(value.samples), static_cast<unsigned long long>(value.dropped));
+            ImGui::Text("Contacts: %u  |  Physics state: %u", value.contacts, value.physics_state);
+            ImGui::Text("Rendered poses: %llu  |  Rejected: %llu", static_cast<unsigned long long>(value.rendered_poses),
+                static_cast<unsigned long long>(value.rejected_poses));
+            ImGui::Text("Render exports: %llu  |  Evaluations: %llu  |  Superseded: %llu",
+                static_cast<unsigned long long>(value.export_poses),static_cast<unsigned long long>(value.animation_poses),
+                static_cast<unsigned long long>(value.superseded_poses));
+            note(value.availability.c_str());
+            ImGui::TreePop();
+        }
+    }
     ImGui::EndChild();
     ImGui::PopID();
 }

@@ -1,4 +1,5 @@
 #include "no_bail.h"
+#include "Extension/Slam/slam_runtime.h"
 #include "Engine/Core/Hooks/hooks.h"
 #include "Engine/Core/Log/logging.h"
 #include "Engine/Core/Platform/memory.h"
@@ -189,13 +190,17 @@ std::uint32_t choose_state(std::uintptr_t selector, std::uint32_t current) {
     const bool filtered = filter_requests(selector, &Owner::selector);
     const auto next = protection().choose_original(selector, current);
     LastError error;
-    return filtered && next == wipeout_physics_state && protected_owner(selector, &Owner::selector) ? current : next;
+    const auto chosen = filtered && next == wipeout_physics_state && protected_owner(selector, &Owner::selector) ? current : next;
+    slam::observe_selection(selector, chosen);
+    return chosen;
 }
 void skeleton_response(std::uintptr_t rig, float seconds, bool wipeout) {
     // The state post-update can raise another request after the selector ran.
     // Filter at this consumer, then let native constraints and recovery run.
     if (filter_requests(rig, &Owner::rig)) wipeout = false;
     protection().skeleton_original(rig, seconds, wipeout);
+    LastError error;
+    slam::observe_skeleton(rig, seconds, wipeout);
 }
 bool clear_contact_output(std::uintptr_t contacts) noexcept {
     if (contacts < 0x10000 || contacts > highest - body_contact_output_offset) return false;
@@ -318,6 +323,13 @@ bool start_no_bail(std::uintptr_t base) noexcept {
     return false;
 }
 bool no_bail_available() noexcept { return protection().ready.load(std::memory_order_acquire); }
+bool resolve_local_bail_owner(std::uintptr_t client, std::uintptr_t entity, LocalBailOwner& result) noexcept {
+    LastError error;
+    Owner owner;
+    if (!protection().ready.load(std::memory_order_acquire) || !resolve(client, entity, owner)) return false;
+    result = {protection().base, entity, pointer(client, 8), owner.core, owner.context, owner.rig, owner.selector};
+    return result.world != 0;
+}
 bool update_no_bail(std::uintptr_t client, std::uintptr_t entity, bool manual,
     bool flying, std::uint64_t flight_expires) noexcept {
     LastError error;

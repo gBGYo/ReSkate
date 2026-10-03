@@ -103,6 +103,11 @@ add_library(dingosdk_runtime SHARED
     Extension/Skater/client_debug.cpp
     Extension/Skater/ai_skaters.cpp
     Extension/Skater/no_bail.cpp
+    Extension/Slam/slam_model.cpp
+    Extension/Slam/slam_progression.cpp
+    Extension/Slam/slam_mesh.cpp
+    Extension/Slam/slam_visuals.cpp
+    Extension/Slam/slam_runtime.cpp
     Extension/Skater/physics_tuning.cpp
     Extension/Multiplayer/Remote/remote_collision.cpp
     Extension/Skater/physics_tuning_model.cpp

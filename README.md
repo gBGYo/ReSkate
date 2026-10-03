@@ -22,6 +22,7 @@ the launcher, the runtime that loads into the game, and the dedicated server.
   - World: time of day, population, district levels, rotating parks.
   - The **Park Editor**: place, move and save objects with freecam, snapping and undo.
   - Skater options: first person, movement, boosts, noclip.
+  - Offline **Slam Challenge** prototype: score falls and body impacts, with injury highlights and retries.
   - Progression, controls, graphics and multiplayer settings.
 - **Mods.**
   - Drop a mod in `Mods/` and it is merged into the game at launch. Mods can add custom maps, loading
@@ -58,6 +59,47 @@ ReSkate supports one game build at a time (Steam build `25414733`).
 | **T** | chat, in multiplayer |
 
 The menu and console keys can be changed in the launcher's Settings.
+
+### Slam Challenge
+
+Open **Skater → SLAM** in the ReSkate menu and choose **Start attempt**, then take a fall.
+The HUD scores distinct impacts, fall distance, airtime and sliding. A skinned 3D X-ray mesh reuses the
+installed game's **Dem Bones** skeleton and highlights injured regions through the skater: orange for
+bruises and red for fractures. Each region awards its
+fracture bonus once per attempt. These are arcade injury scores; the mode does not alter the game's
+ragdoll or damage the skater's bones.
+
+After the round, recover and mount your board, then choose **Retry from here**. **Stop attempt** cancels
+the round; **Dismiss HUD** hides it. Console equivalents are `slam start`, `slam retry`, `slam stop`,
+`slam dismiss` and `slam status`.
+
+The prototype requires offline play with No Bail, Noclip and the Park Editor off. Respawns, map changes,
+teleports or lost physics telemetry cancel an active attempt. Retry begins at your current position.
+The X-ray mesh loads once in the background when an attempt or normal-play X-ray first opens. It reads
+the player animation and native skinning buffers, including hands and corrective bones, and uses a
+separate depth buffer for the skeleton's own surfaces. On the supported build, it captures the native
+main rendering camera and skinning palette together rather than refreshing a CPU camera at overlay
+draw time. A focused live playtest confirmed smooth alignment while running off board, skating,
+turning and falling.
+Under **Skater → SLAM → X-RAY**, choose whether the skeleton appears during attempts, after bailing,
+after scored impacts, or stays off. Opacity, impact flash strength and the duration after impacts are
+adjustable and saved automatically. **Reduced effects** keeps steady injury colors and removes flashes.
+Enable **X-ray in normal play** under **Skater → CAMERA** or **Skater → SLAM → X-RAY** to use the
+skeleton while skating without starting or resetting a Slam attempt. It follows successive falls,
+automatically clears injury highlights after recovery, and does not open the Slam score HUD.
+The same visibility settings apply; **During attempts** becomes **Always** in normal play.
+Choose **Always** and disable **Only impacted bones** for a continuously visible full skeleton, or
+choose **After impacts** with **Only impacted bones** for repeatable impact effects. The toggle is saved.
+Normal-play X-ray works with No Bail enabled; Noclip, Park Editor, loading and online play pause it.
+Enable **Only impacted bones** to hide untouched parts and reveal the body bones involved in scored
+contacts. A forearm hit reveals the forearm separately from the hand or upper arm. Fingers follow their
+hand collider, and the skull follows the native head/neck collider; the game does not report individual
+finger or skull-bone contacts. Injuries and fractures are tracked per physical bone for the visual,
+while challenge scoring and fracture bonuses remain grouped into six body regions.
+Impact flashes affect the injured bones and fade once; they do not flash the whole screen. The mesh
+hides in First person to keep the skull from covering the camera, while the challenge keeps scoring.
+The current X-ray pass draws through scenery as well as the skater; scene occlusion remains part of
+the full-mode work. No extracted game assets are shipped.
 
 ### Where things are
 
@@ -164,8 +206,8 @@ Useful launcher flags:
 ### Tests
 
 Each module keeps its regression tests in a `Test/` folder. Turn them on with any of
-`DINGOSDK_BUILD_MULTIPLAYER_TESTS`, `DINGOSDK_BUILD_LAUNCHER_TESTS`, `DINGOSDK_BUILD_PARK_EDITOR_TESTS`
-and `DINGOSDK_BUILD_BACKTRACE_TESTS`, then run CTest:
+`DINGOSDK_BUILD_MULTIPLAYER_TESTS`, `DINGOSDK_BUILD_LAUNCHER_TESTS`, `DINGOSDK_BUILD_PARK_EDITOR_TESTS`,
+`DINGOSDK_BUILD_BACKTRACE_TESTS` and `DINGOSDK_BUILD_SLAM_TESTS`, then run CTest:
 
 ```powershell
 cmake --preset vs2022-x64 -DDINGOSDK_BUILD_MULTIPLAYER_TESTS=ON -DDINGOSDK_BUILD_LAUNCHER_TESTS=ON

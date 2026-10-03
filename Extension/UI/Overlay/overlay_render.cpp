@@ -6,6 +6,8 @@
 #include "chat_emotes.h"
 #include "input_capture.h"
 #include "cursor.h"
+#include "Extension/Slam/slam_runtime.h"
+#include "slam_mesh_renderer.h"
 
 namespace dingosdk::overlay::detail {
 
@@ -28,6 +30,7 @@ bool completed(UINT64 value, DWORD timeout_ms) {
 void destroy_graphics() {
     auto& s = state();
     clear_park_previews();
+    clear_slam_mesh_renderer();
     restore_input(false);
     {
         std::lock_guard lock(s.input_mutex);
@@ -453,6 +456,7 @@ void render(IDXGISwapChain* presented, UINT flags) {
     const bool skate_hud_frame = skate_hud_pending();
     const bool nametag_frame = nametags_pending();
     const bool perf_frame = perf_hud_pending();
+    const bool slam_frame = dingosdk::slam::visuals_visible();
     const bool menu_frame = interactive_visible(s);
     if (!menu_frame) {
         if (s.ui_was_interactive) {
@@ -469,7 +473,7 @@ void render(IDXGISwapChain* presented, UINT flags) {
         }
         // Hidden, the overlay still draws while a notice or chat line is on screen.
         if (s.loaded_notice_posted && !notices_pending() && !chat_frame && !game_text_frame && !skate_hud_frame &&
-            !nametag_frame && !perf_frame) return;
+            !nametag_frame && !perf_frame && !slam_frame) return;
     } else if (!s.ui_was_interactive) {
         s.ui_was_interactive = true;
         s.last_model = {}; // Reopening immediately reads fresh state.
@@ -508,6 +512,14 @@ void render(IDXGISwapChain* presented, UINT flags) {
     ImGui::GetIO().MouseDrawCursor = owns_menu_cursor(s);
     ImGui_ImplDX12_NewFrame();
     { OverlayInputAccess access; ImGui_ImplWin32_NewFrame(); }
+    // Windowed rendering can use a larger backbuffer than the client area.
+    // Keep UI/input in client coordinates and scale viewport and scissors to
+    // the actual presented resource, including after a resolution change.
+    auto& io = ImGui::GetIO();
+    const auto buffer_desc = current_buffer->GetDesc();
+    io.DisplayFramebufferScale = {
+        io.DisplaySize.x > 0 ? static_cast<float>(buffer_desc.Width) / io.DisplaySize.x : 1.f,
+        io.DisplaySize.y > 0 ? static_cast<float>(buffer_desc.Height) / io.DisplaySize.y : 1.f};
     update_menu_pointer();
     ImGui::NewFrame();
     if (menu_frame) {
@@ -516,6 +528,7 @@ void render(IDXGISwapChain* presented, UINT flags) {
         draw_perf_window();
     }
     draw_nametags();
+    draw_slam();
     draw_game_text();
     draw_skate_hud();
     draw_perf_hud();
@@ -523,7 +536,13 @@ void render(IDXGISwapChain* presented, UINT flags) {
     draw_chat();
     sync_menu_cursor(); // close buttons also change visibility, without a key message
     ImGui::Render();
-    if (ImGui::GetDrawData()->TotalVtxCount == 0) { ImGui::SetCurrentContext(previous); return; }
+    // The 3D X-ray can draw on its own, with no menu or score HUD vertices.
+    // Still call the ImGui backend below to keep its upload rotation paired
+    // with submitted_draws, including these mesh-only submissions.
+    const auto* draw_data=ImGui::GetDrawData();
+    if ((!slam_frame && draw_data->TotalVtxCount==0) || draw_data->DisplaySize.x<=0 || draw_data->DisplaySize.y<=0) {
+        ImGui::SetCurrentContext(previous); return;
+    }
     const auto upload_slot = static_cast<std::size_t>(s.submitted_draws % s.upload_fences.size());
     // The ImGui backend rotates upload buffers by submitted draw count, while
     // command allocators rotate by swapchain index. Wait for both exact owners
@@ -547,6 +566,8 @@ void render(IDXGISwapChain* presented, UINT flags) {
     barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
     s.commands->ResourceBarrier(1, &barrier);
     s.commands->OMSetRenderTargets(1, &frame.rtv, FALSE, nullptr);
+    render_slam_mesh(s.device.Get(),s.commands.Get(),frame.rtv,buffer_desc.Format,
+        static_cast<UINT>(buffer_desc.Width),buffer_desc.Height,index,s.frames.size());
     ID3D12DescriptorHeap* heaps[] = {s.srvs.Get()};
     s.commands->SetDescriptorHeaps(1, heaps);
     ImGui_ImplDX12_RenderDrawData(ImGui::GetDrawData(), s.commands.Get());

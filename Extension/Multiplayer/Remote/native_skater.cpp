@@ -1,6 +1,7 @@
 #include "native_skater_internal.h"
 #include "native_pose_layout.h"
 #include "puppet_cost.h"
+#include "Extension/Slam/slam_runtime.h"
 #include "Extension/Multiplayer/Session/monotonic_clock.h"
 #include "Extension/Multiplayer/Session/peer_slots.h"
 #include "Engine/Core/Hooks/hooks.h"
@@ -8,6 +9,7 @@
 #include "Engine/Game/Build/20260929/engine.h"
 #include <algorithm>
 #include <cstring>
+#include <intrin.h>
 #include <span>
 
 namespace dingosdk::multiplayer {
@@ -336,6 +338,7 @@ bool render_pose_hook(std::uintptr_t animation_interface, std::uintptr_t render_
     const bool result = shared().original_render_pose(animation_interface, render_data);
     if (const auto listener = shared().render_listener.load(std::memory_order_acquire); result && listener)
         listener(animation_interface);
+    if (result) slam::observe_render(animation_interface, render_data,reinterpret_cast<std::uintptr_t>(_ReturnAddress()));
     // A board holder's animation interface is holder + 0xc0.
     if (const auto slot = result && animation_interface > 0xc0
                               ? watching(watched().board_holder, animation_interface - 0xc0)
@@ -378,6 +381,7 @@ void animation_hook(std::uintptr_t component, std::uintptr_t update) {
     shared().original_animation(component, update);
     if (const auto listener = shared().evaluated_listener.load(std::memory_order_acquire))
         listener(component);
+    slam::observe_animation(component);
 }
 void destroy_hook(std::uintptr_t entity, std::uintptr_t owner) {
     // Other SDK-created actors share this hook; they must forget the entity

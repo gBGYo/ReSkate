@@ -12,6 +12,7 @@
 #include "Extension/Multiplayer/Hud/custom_nametags.h"
 #include "Extension/Multiplayer/Hud/follow_camera.h"
 #include "Engine/Game/UI/game_view.h"
+#include "Engine/Game/Multiplayer/session_tools.h"
 #include "Extension/Multiplayer/Steam/steam_friend_join.h"
 #include "Extension/Objects/network_object_runtime.h"
 #include "Extension/Profile/local_profile_runtime.h"
@@ -21,6 +22,7 @@
 #include "Extension/Settings/gameplay_settings_override.h"
 #include "Extension/Settings/named_settings.h"
 #include "Extension/Skater/ai_skaters.h"
+#include "Extension/Slam/slam_runtime.h"
 #include "Extension/Skater/client_source_spawn.h"
 #include "Extension/Skater/skater_slot_override.h"
 #include "Extension/Throwdowns/native_throwdowns.h"
@@ -984,6 +986,13 @@ void tick(std::uintptr_t client, std::uintptr_t update) {
         {
             DINGO_PROFILE_ZONE("tick/multiplayer");
             dingosdk::multiplayer::tick(r.base,client,multiplayer_ready,r.multiplayer_map,load_multiplayer_map);
+        }
+        {
+            DINGO_PROFILE_ZONE("tick/Slam Challenge");
+            dingosdk::slam::tick(r.base, client, r.debug_model.skater_identity,
+                multiplayer_ready && game_type == 1, !dingosdk::multiplayer_session_active(),
+                r.debug_model.no_bail || r.debug_model.no_bail_active, r.debug_model.noclip,
+                r.debug_model.park_editor, r.debug_model.first_person, r.multiplayer_map);
         }
         dingosdk::tick_local_developer_hoodie(r.base, client, multiplayer_ready);
         dingosdk::tick_local_developer_board(r.base, client, multiplayer_ready);
