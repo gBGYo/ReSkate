@@ -148,8 +148,16 @@ you scrub forward or backward. It retains up to ten minutes of injury history fr
 offline session, capped at 2,048 changed states. Loading, a different local skater or a reset
 recording clears that history. Recordings outside the retained history show neutral bones;
 injury-only filters can therefore hide them. Injury metadata is not saved with replay files.
+Video exports use the native export frame time to restore injuries and fracture effects, so
+damage appears at the recorded impact even when the editor preview is parked later in the clip.
 Replay suspends Slam scoring, manual bail, retries, sounds, camera effects and automatic slow motion.
-The overlay is drawn in the replay editor; inclusion in native video exports has not been verified.
+The replay X-ray is composited into native video export frames before encoding, at the export
+resolution, with the selected bone filters and opacity. Each native capture slot retains its
+pose, camera and injury state from the scene texture copy until its pixels reach the encoder,
+so queued GPU readbacks do not borrow a newer player pose or camera. Restarting export clears
+the saved capture slots. Menus and other ReSkate overlays are not included by this capture path.
+Export timing, delayed capture slots and GPU pixel composition have regression
+coverage, and skeleton alignment in exported video has been confirmed in game.
 Choose **Always** and disable **Only impacted bones** for a continuously visible full skeleton, or
 choose **After impacts** with **Only impacted bones** for repeatable impact effects. The toggle is saved.
 Enable **Show only fractured bones** under **Skater → SLAM → X-RAY** to show only red broken bones,

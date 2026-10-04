@@ -900,7 +900,8 @@ void tick(std::uintptr_t base, std::uintptr_t client, std::uintptr_t entity, boo
         if (!s.replay_contracts_checked) {
             s.replay_contracts_checked=true;
             bool valid=true;
-            for (const auto& contract : {game::build::v20260929::replay::playback_clock,game::build::v20260929::replay::recording_clock}) {
+            for (const auto& contract : {game::build::v20260929::replay::playback_clock,game::build::v20260929::replay::recording_clock,
+                game::build::v20260929::replay::export_clock,game::build::v20260929::replay::export_advance}) {
                 std::array<unsigned char,32> actual{};
                 if (!read(base+contract.rva,actual) || actual!=contract.bytes) valid=false;
             }

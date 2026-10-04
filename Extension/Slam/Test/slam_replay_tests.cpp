@@ -90,10 +90,60 @@ void native_clock() {
     check(clock && !clock->playback && clock->time==11,"Recording time uses interval start, step and count");
     memory.set(manager+r::lease,session); memory.set(session,base+r::lease_vtable); memory.set(session+16,manager);
     memory.set(base+r::playing,std::uint8_t{1}); memory.set(base+r::playhead,10.25);
+    constexpr auto export_state=r::export_sequence,export_time=export_state+r::export_time,
+        export_index=export_state+r::export_index,export_status=export_state+r::export_status;
+    memory.set(base+export_state,std::array<std::byte,r::export_header_size>{});
     clock=read_replay_clock(base,read);
     check(clock && clock->playback && clock->time==10.25 && clock->recorded_until==11,"Playback reads the playhead independently of recording end");
     memory.set(base+r::playhead,10.1);
     check(read_replay_clock(base,read)->time==10.1,"Reverse seeks are read without accumulating elapsed wall time");
+    // The preview stays after the impact while a trimmed video is exported
+    // from an earlier time. The native export cursor advances independently.
+    ReplayVisualHistory history;
+    Result result; result.phase=Phase::attempt; VisualEvents events;
+    for (int i=0;i<=10;++i) {
+        if (i==5) {result.phase=Phase::bailed; result.bone_injuries[103]={250,0,true}; events.observe(result,700000);}
+        history.record(10+i*.1,result,events,700000);
+    }
+    memory.set(base+r::playhead,10.75);
+    memory.set(base+export_state,std::uintptr_t{0x800000});
+    memory.set(base+export_state+r::export_count,std::uint32_t{1});
+    memory.set(base+export_status,std::uint8_t{1});
+    for (double time : {10.25,10.5,10.75,10.95,10.25}) {
+        memory.set(base+export_time,time);
+        clock=read_replay_clock(base,read);
+        check(clock && clock->exporting && clock->time==time,"Export uses the native frame cursor instead of the parked editor playhead");
+        const auto frame=clock ? history.sample(clock->time) : std::nullopt;
+        check(frame && frame->result.bone_injuries[103].fractured==(time>=10.5),
+            "Exported bones become damaged at impact and rewind to neutral on a new export");
+        if (frame) {
+            const auto appearance=visual_appearance(VisualOptions{},frame->result,frame->events,
+                ReplayVisualHistory::milliseconds(clock->time),false,true);
+            check(appearance.damage[103][0]==(time>=10.5 ? 1.f : 0.f),"Export fracture marks follow the rendered frame's injury state");
+            check((appearance.damage[103][3]>0)==(time>=10.5 && time<10.85),"Export fracture effects age on the native frame cursor");
+        }
+    }
+    memory.set(base+export_time,10.75); memory.set(base+export_status,std::uint8_t{2});
+    memory.set(base+export_index,std::uint32_t{1});
+    check(read_replay_clock(base,read)->time==10.75,"The last export frame keeps its cursor until native export cleanup");
+    memory.set(base+export_status,std::uint8_t{0}); memory.set(base+export_time,10.25);
+    clock=read_replay_clock(base,read);
+    check(clock && !clock->exporting && clock->time==10.75,"Finishing export restores the editor playhead without retaining its cursor");
+    memory.set(base+export_status,std::uint8_t{1}); memory.set(base+export_index,std::uint32_t{});
+    memory.set(base+export_time,std::numeric_limits<double>::quiet_NaN());
+    check(!read_replay_clock(base,read),"An invalid export cursor cannot fall back to damage from the preview");
+    memory.set(base+export_time,10.25); memory.set(base+export_state,std::uintptr_t{});
+    check(!read_replay_clock(base,read),"A missing export sequence cannot authorize its frame cursor");
+    memory.set(base+export_state,std::uintptr_t{0x800000}); memory.set(base+export_index,std::uint32_t{1});
+    check(!read_replay_clock(base,read),"An out-of-range active export index cannot publish injuries");
+    memory.set(base+export_index,std::uint32_t{});
+    unsigned export_copies{};
+    auto export_torn=[&](std::uintptr_t at,void* out,std::size_t size) {
+        if (at==base+export_state && ++export_copies==2) memory.set(base+export_time,10.5);
+        return memory.read(at,out,size);
+    };
+    check(!read_replay_clock(base,export_torn),"Concurrent export cursor changes cannot publish a torn frame time");
+    memory.set(base+export_status,std::uint8_t{0});
     memory.set(session+16,stream);
     check(!read_replay_clock(base,read),"An unrelated session lease cannot authorize playback");
     memory.set(session+16,manager); memory.set(base+r::playhead,std::numeric_limits<double>::quiet_NaN());

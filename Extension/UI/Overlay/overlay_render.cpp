@@ -8,6 +8,7 @@
 #include "cursor.h"
 #include "Extension/Slam/slam_runtime.h"
 #include "slam_mesh_renderer.h"
+#include "replay_capture.h"
 
 namespace dingosdk::overlay::detail {
 
@@ -589,5 +590,23 @@ void render(IDXGISwapChain* presented, UINT flags) {
 void guarded_render(IDXGISwapChain* chain, UINT flags) noexcept {
     try { render(chain, flags); }
     catch (...) { state().failed = true; restore_input(true); dingosdk::logging::write(dingosdk::logging::Level::error, dingosdk::logging::Channel::graphics, "Overlay exception; disabled."); }
+}
+}
+namespace dingosdk::overlay {
+ReplayCaptureResult capture_slam_frame(std::span<std::uint8_t> pixels,const replay_export::BgraFrame& frame,
+    const slam::Snapshot& value) noexcept {
+    try {
+        if (!value.visuals.replay || value.visuals.visibility==slam::XrayVisibility::off) return ReplayCaptureResult::inactive;
+        if (!value.replay_active || !value.replay_available || !value.mesh || !value.mesh_pose ||
+            !value.mesh_pose->render_camera) return ReplayCaptureResult::unavailable;
+        const auto appearance=slam::visual_appearance(value.visuals,value.replay_result,value.replay_events,
+            value.replay_time_ms,false,true);
+        if (appearance.opacity<=.001f) return ReplayCaptureResult::inactive;
+        auto& s=detail::state();
+        std::lock_guard lock(s.render_mutex);
+        if (s.stop.load() || !s.ready || !s.device) return ReplayCaptureResult::unavailable;
+        return detail::capture_slam_mesh(s.device.Get(),value,pixels,frame) ?
+            ReplayCaptureResult::included : ReplayCaptureResult::unavailable;
+    } catch (...) {return ReplayCaptureResult::unavailable;}
 }
 }

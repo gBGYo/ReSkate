@@ -37,6 +37,15 @@ if(DINGOSDK_BUILD_SLAM_TESTS)
     add_executable(dingosdk_slam_replay_tests Extension/Slam/Test/slam_replay_tests.cpp Extension/Slam/slam_replay.cpp Extension/Slam/slam_visuals.cpp Extension/Slam/slam_model.cpp)
     target_link_libraries(dingosdk_slam_replay_tests PRIVATE dingosdk_json)
     add_test(NAME slam_replay COMMAND dingosdk_slam_replay_tests)
+    if(WIN32)
+        add_executable(dingosdk_slam_capture_tests Extension/Slam/Test/slam_capture_tests.cpp
+            Extension/UI/Overlay/slam_mesh_renderer.cpp Extension/Slam/slam_mesh.cpp
+            Extension/Slam/slam_visuals.cpp Extension/Slam/slam_model.cpp)
+        target_link_libraries(dingosdk_slam_capture_tests PRIVATE dingosdk_json dingosdk_game_archives
+            dingosdk_logging d3d12 dxgi d3dcompiler)
+        dingosdk_configure_target(dingosdk_slam_capture_tests)
+        add_test(NAME slam_video_capture COMMAND dingosdk_slam_capture_tests)
+    endif()
     add_executable(dingosdk_slam_settings_tests Extension/Slam/Test/slam_settings_tests.cpp)
     target_link_libraries(dingosdk_slam_settings_tests PRIVATE dingosdk_console_core dingosdk_content_cache dingosdk_logging)
     add_test(NAME slam_impact_settings COMMAND dingosdk_slam_settings_tests)

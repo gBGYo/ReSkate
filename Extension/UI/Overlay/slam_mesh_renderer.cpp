@@ -221,56 +221,62 @@ slam::PoseMatrix camera_matrix(const slam::PoseMatrix& camera) {
 }
 std::string_view slam_mesh_renderer_status() noexcept {return renderer().status;}
 void clear_slam_mesh_renderer() noexcept {renderer()=Renderer{};}
-void render_slam_mesh(ID3D12Device* device,ID3D12GraphicsCommandList* commands,D3D12_CPU_DESCRIPTOR_HANDLE target,
-    DXGI_FORMAT format,UINT width,UINT height,std::size_t frame_index,std::size_t frame_count) noexcept {
-    auto& r=renderer();
-    if (r.failed || !slam::visuals_visible() || !width || !height || frame_index>=frame_count) return;
+namespace {
+bool render_mesh(Renderer& r,ID3D12Device* device,ID3D12GraphicsCommandList* commands,D3D12_CPU_DESCRIPTOR_HANDLE target,
+    DXGI_FORMAT format,UINT width,UINT height,std::size_t frame_index,std::size_t frame_count,
+    slam::Snapshot value,bool capture) noexcept {
+    if (r.failed || !width || !height || frame_index>=frame_count) return false;
     try {
-        auto value=slam::presentation_snapshot();
-        if (!value.mesh) return;
+        if (!value.mesh) return false;
         // Shader/PSO preparation may take seconds on the first run. Keep it
         // off Present and start as soon as the mesh is loaded, before a fall.
         // These immutable D3D12 resources have never been submitted to a GPU.
         if (!r.pipeline) {
-            if (!r.preparation.valid()) {
-                r.status="Preparing 3D X-ray...";
-                ComPtr<ID3D12Device> owned_device=device;
-                r.preparation=std::async(std::launch::async,[owned_device,format,frame_count,mesh=value.mesh] {
-                    auto prepared=std::make_shared<Renderer>();
-                    setup(*prepared,owned_device.Get(),format,frame_count,mesh);
-                    return prepared;
-                });
+            if (capture) {
+                // Export is synchronous: retain this exact frame's snapshot
+                // while preparing the private pipeline, including frame zero.
+                setup(r,device,format,frame_count,value.mesh);
+            } else {
+                if (!r.preparation.valid()) {
+                    r.status="Preparing 3D X-ray...";
+                    ComPtr<ID3D12Device> owned_device=device;
+                    r.preparation=std::async(std::launch::async,[owned_device,format,frame_count,mesh=value.mesh] {
+                        auto prepared=std::make_shared<Renderer>();
+                        setup(*prepared,owned_device.Get(),format,frame_count,mesh);
+                        return prepared;
+                    });
+                }
+                if (r.preparation.wait_for(std::chrono::milliseconds(0))!=std::future_status::ready) return false;
+                auto prepared=r.preparation.get();
+                r=std::move(*prepared);
+                // Preparation must not cause the first mesh draw to use the pose
+                // copied before compilation started.
+                value=slam::presentation_snapshot();
             }
-            if (r.preparation.wait_for(std::chrono::milliseconds(0))!=std::future_status::ready) return;
-            auto prepared=r.preparation.get();
-            r=std::move(*prepared);
-            // Preparation must not cause the first mesh draw to use the pose
-            // copied before compilation started.
-            value=slam::presentation_snapshot();
         }
         const bool replay=value.replay_active && value.replay_available && value.visuals.replay;
         const bool normal_play=!value.replay_active && value.visuals.normal_play && value.normal_xray_available;
         if ((value.replay_active && !replay) ||
             (!replay && !normal_play && (!value.visible || !value.xray_context_valid || value.result.cancelled)) || !value.mesh || !value.mesh_pose ||
-            GetTickCount64()-value.mesh_pose->at_ms>=250) return;
+            (!capture && GetTickCount64()-value.mesh_pose->at_ms>=250)) return false;
         const auto& shown_result=replay ? value.replay_result : normal_play ? value.normal_xray_result : value.result;
         const auto& shown_events=replay ? value.replay_events : normal_play ? value.normal_xray_events : value.visual_events;
         const auto appearance=slam::visual_appearance(value.visuals,
             shown_result,shown_events,replay ? value.replay_time_ms : GetTickCount64(),
             !replay && value.first_person,replay || normal_play);
-        if (appearance.opacity<=.001f) return;
+        if (appearance.opacity<=.001f) return false;
         slam::RenderCamera view;
         if (value.mesh_pose->render_camera) {
             // The main raster submission captured both values together.
             // Reading a newer CPU camera here breaks that pairing in motion.
             view=*value.mesh_pose->render_camera;
         } else {
-            if (replay) return;
+            if (replay) return false;
             auto fallback=latest_game_view();
-            if (!fallback || !refresh_game_view(value.image_base,*fallback)) return;
+            if (!fallback || !refresh_game_view(value.image_base,*fallback)) return false;
             view.world=fallback->world; view.vertical_fov=fallback->vertical_fov;
         }
-        if (r.mesh!=value.mesh || r.frames.size()!=frame_count) return;
+        if (r.mesh!=value.mesh || r.frames.size()!=frame_count) return false;
         auto& frame=r.frames[frame_index];
         auto depth=r.depths->GetCPUDescriptorHandleForHeapStart();
         depth.ptr+=frame_index*device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_DSV);
@@ -326,10 +332,131 @@ void render_slam_mesh(ID3D12Device* device,ID3D12GraphicsCommandList* commands,D
                     value.mesh_pose->render_export ? "animation export" : "animation evaluation",
                 value.export_poses,value.animation_poses,value.superseded_poses,value.rejected_poses);
         }
+        return true;
     } catch (const std::exception& error) {
         r.failed=true; r.status=std::string("3D X-ray unavailable: ")+error.what();
         logging::write(logging::Level::warning,logging::Channel::graphics,r.status);
         commands->OMSetRenderTargets(1,&target,FALSE,nullptr);
     } catch (...) {r.failed=true; r.status="3D X-ray unavailable.";}
+    return false;
+}
+
+struct CaptureRenderer {
+    Renderer mesh;
+    ComPtr<ID3D12Device> device;
+    ComPtr<ID3D12CommandQueue> queue;
+    ComPtr<ID3D12CommandAllocator> allocator;
+    ComPtr<ID3D12GraphicsCommandList> commands;
+    ComPtr<ID3D12Fence> fence;
+    ComPtr<ID3D12DescriptorHeap> rtvs;
+    ComPtr<ID3D12Resource> target,readback;
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
+    UINT64 bytes{},submitted{};
+    HANDLE event{};
+    UINT width{},height{};
+    bool failed{},logged{};
+};
+CaptureRenderer& capture_renderer() {static auto* value=new CaptureRenderer; return *value;}
+void finish_capture(CaptureRenderer& c) {
+    if (!c.submitted || c.fence->GetCompletedValue()>=c.submitted) return;
+    check(c.fence->SetEventOnCompletion(c.submitted,c.event),"Cannot wait for X-ray export GPU work");
+    if (WaitForSingleObject(c.event,5000)!=WAIT_OBJECT_0 || c.fence->GetCompletedValue()<c.submitted)
+        throw std::runtime_error("X-ray export GPU work did not complete");
+}
+void setup_capture(CaptureRenderer& c,ID3D12Device* device) {
+    c.device=device;
+    D3D12_COMMAND_QUEUE_DESC queue{}; queue.Type=D3D12_COMMAND_LIST_TYPE_DIRECT;
+    check(device->CreateCommandQueue(&queue,IID_PPV_ARGS(&c.queue)),"Cannot create X-ray export queue");
+    check(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,IID_PPV_ARGS(&c.allocator)),"Cannot create X-ray export allocator");
+    check(device->CreateCommandList(0,D3D12_COMMAND_LIST_TYPE_DIRECT,c.allocator.Get(),nullptr,IID_PPV_ARGS(&c.commands)),"Cannot create X-ray export commands");
+    check(c.commands->Close(),"Cannot close initial X-ray export commands");
+    check(device->CreateFence(0,D3D12_FENCE_FLAG_NONE,IID_PPV_ARGS(&c.fence)),"Cannot create X-ray export fence");
+    c.event=CreateEventW(nullptr,FALSE,FALSE,nullptr);
+    if (!c.event) throw std::runtime_error("Cannot create X-ray export completion event");
+    D3D12_DESCRIPTOR_HEAP_DESC rtvs{}; rtvs.Type=D3D12_DESCRIPTOR_HEAP_TYPE_RTV; rtvs.NumDescriptors=1;
+    check(device->CreateDescriptorHeap(&rtvs,IID_PPV_ARGS(&c.rtvs)),"Cannot create X-ray export target descriptor");
+}
+void resize_capture(CaptureRenderer& c,UINT width,UINT height) {
+    if (c.target && c.width==width && c.height==height) return;
+    D3D12_HEAP_PROPERTIES heap{}; heap.Type=D3D12_HEAP_TYPE_DEFAULT;
+    D3D12_RESOURCE_DESC target{}; target.Dimension=D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    target.Width=width; target.Height=height; target.DepthOrArraySize=1; target.MipLevels=1;
+    target.Format=DXGI_FORMAT_B8G8R8A8_UNORM; target.SampleDesc.Count=1; target.Flags=D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+    D3D12_CLEAR_VALUE clear{}; clear.Format=target.Format;
+    check(c.device->CreateCommittedResource(&heap,D3D12_HEAP_FLAG_NONE,&target,D3D12_RESOURCE_STATE_COPY_SOURCE,&clear,IID_PPV_ARGS(&c.target)),"Cannot create X-ray export target");
+    c.device->CreateRenderTargetView(c.target.Get(),nullptr,c.rtvs->GetCPUDescriptorHandleForHeapStart());
+    c.device->GetCopyableFootprints(&target,0,1,0,&c.footprint,nullptr,nullptr,&c.bytes);
+    heap.Type=D3D12_HEAP_TYPE_READBACK;
+    D3D12_RESOURCE_DESC buffer{}; buffer.Dimension=D3D12_RESOURCE_DIMENSION_BUFFER;
+    buffer.Width=c.bytes; buffer.Height=1; buffer.DepthOrArraySize=1; buffer.MipLevels=1;
+    buffer.SampleDesc.Count=1; buffer.Layout=D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    check(c.device->CreateCommittedResource(&heap,D3D12_HEAP_FLAG_NONE,&buffer,D3D12_RESOURCE_STATE_COPY_DEST,nullptr,IID_PPV_ARGS(&c.readback)),"Cannot create X-ray export readback");
+    c.width=width; c.height=height;
+}
+}
+void render_slam_mesh(ID3D12Device* device,ID3D12GraphicsCommandList* commands,D3D12_CPU_DESCRIPTOR_HANDLE target,
+    DXGI_FORMAT format,UINT width,UINT height,std::size_t frame_index,std::size_t frame_count) noexcept {
+    if (!slam::visuals_visible()) return;
+    try {render_mesh(renderer(),device,commands,target,format,width,height,frame_index,frame_count,slam::presentation_snapshot(),false);}
+    catch (...) {}
+}
+bool capture_slam_mesh(ID3D12Device* device,const slam::Snapshot& value,
+    std::span<std::uint8_t> pixels,const replay_export::BgraFrame& frame) noexcept {
+    auto& c=capture_renderer();
+    const auto checked=replay_export::bgra_frame(frame.width,frame.height,frame.pitch);
+    if (!device || c.failed || !checked || checked->bytes!=frame.bytes || pixels.size()<frame.bytes ||
+        !value.replay_active || !value.replay_available || !value.visuals.replay || !value.mesh_pose ||
+        !value.mesh_pose->render_camera) return false;
+    try {
+        finish_capture(c);
+        if (c.device.Get()!=device) {
+            if (c.event) CloseHandle(c.event);
+            c=CaptureRenderer{};
+            setup_capture(c,device);
+        }
+        resize_capture(c,frame.width,frame.height);
+        check(c.allocator->Reset(),"Cannot reset X-ray export allocator");
+        check(c.commands->Reset(c.allocator.Get(),nullptr),"Cannot reset X-ray export commands");
+        D3D12_RESOURCE_BARRIER barrier{}; barrier.Type=D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        barrier.Transition.pResource=c.target.Get(); barrier.Transition.Subresource=D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        barrier.Transition.StateBefore=D3D12_RESOURCE_STATE_COPY_SOURCE; barrier.Transition.StateAfter=D3D12_RESOURCE_STATE_RENDER_TARGET;
+        c.commands->ResourceBarrier(1,&barrier);
+        const auto rtv=c.rtvs->GetCPUDescriptorHandleForHeapStart();
+        const float clear[4]{};
+        c.commands->ClearRenderTargetView(rtv,clear,0,nullptr);
+        const bool drawn=render_mesh(c.mesh,device,c.commands.Get(),rtv,DXGI_FORMAT_B8G8R8A8_UNORM,
+            frame.width,frame.height,0,1,value,true);
+        std::swap(barrier.Transition.StateBefore,barrier.Transition.StateAfter);
+        c.commands->ResourceBarrier(1,&barrier);
+        D3D12_TEXTURE_COPY_LOCATION source{}; source.pResource=c.target.Get(); source.Type=D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        D3D12_TEXTURE_COPY_LOCATION destination{}; destination.pResource=c.readback.Get();
+        destination.Type=D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT; destination.PlacedFootprint=c.footprint;
+        c.commands->CopyTextureRegion(&destination,0,0,0,&source,nullptr);
+        check(c.commands->Close(),"Cannot close X-ray export commands");
+        if (!drawn) return false;
+        ID3D12CommandList* lists[]={c.commands.Get()};
+        c.queue->ExecuteCommandLists(1,lists);
+        check(c.queue->Signal(c.fence.Get(),++c.submitted),"Cannot signal X-ray export completion");
+        finish_capture(c);
+        void* mapped{};
+        const D3D12_RANGE read{0,static_cast<SIZE_T>(c.bytes)};
+        check(c.readback->Map(0,&read,&mapped),"Cannot map the rendered X-ray export layer");
+        const bool included=replay_export::composite_bgra(pixels,frame,
+            {static_cast<const std::uint8_t*>(mapped)+c.footprint.Offset,static_cast<std::size_t>(c.bytes-c.footprint.Offset)},
+            c.footprint.Footprint.RowPitch);
+        const D3D12_RANGE written{}; c.readback->Unmap(0,&written);
+        if (included && !c.logged) {
+            c.logged=true;
+            logging::log(logging::Level::info,logging::Channel::graphics,
+                "Replay export: X-ray composited into encoder pixels at {}x{}.",frame.width,frame.height);
+        }
+        return included;
+    } catch (const std::exception& error) {
+        // Retain submitted resources after a timeout or failed signal. The
+        // native encoder still receives its unmodified frame safely.
+        c.failed=true;
+        logging::log(logging::Level::warning,logging::Channel::graphics,"Replay X-ray export unavailable: {}",error.what());
+    } catch (...) {c.failed=true;}
+    return false;
 }
 }

@@ -9,7 +9,7 @@ namespace dingosdk::slam {
 struct ReplayClock {
     std::uintptr_t manager{}, recorder{}, stream{}, session{};
     double time{}, recorded_until{};
-    bool playback{};
+    bool playback{}, exporting{};
 };
 template<class Read> std::optional<std::uint64_t> read_replay_render_key(std::uintptr_t base,std::uintptr_t object,Read&& read) {
     namespace r=game::build::v20260929::replay;
@@ -53,11 +53,27 @@ template<class Read> std::optional<ReplayClock> read_replay_clock(std::uintptr_t
     if (!std::isfinite(start) || start<0 || !std::isfinite(step) || step<=0 || step>1) return {};
     out.recorded_until=start+step*count;
     out.time=out.recorded_until;
-    if (out.playback && !get(base+r::playhead,out.time)) return {};
+    std::array<std::byte,r::export_header_size> capture{},capture_after{};
+    if (out.playback) {
+        if (!read(base+r::export_sequence,capture.data(),capture.size())) return {};
+        const auto status=std::to_integer<unsigned>(capture[r::export_status]);
+        if (status>2) return {};
+        out.exporting=status!=0;
+        if (out.exporting) {
+            std::uintptr_t segments{}; std::uint32_t segments_count{},index{};
+            std::memcpy(&segments,capture.data(),sizeof(segments));
+            std::memcpy(&segments_count,capture.data()+r::export_count,sizeof(segments_count));
+            std::memcpy(&index,capture.data()+r::export_index,sizeof(index));
+            if (segments<0x10000 || segments>=0x00007fffffff0000ULL || (segments&7) ||
+                !segments_count || segments_count>1000000 || index>segments_count || (status==1 && index==segments_count)) return {};
+            std::memcpy(&out.time,capture.data()+r::export_time,sizeof(out.time));
+        } else if (!get(base+r::playhead,out.time)) return {};
+    }
     if (!std::isfinite(out.time) || out.time<0 || out.time>1e9 || !std::isfinite(out.recorded_until) || out.recorded_until>1e9 ||
         ptr(base+r::client)!=client || ptr(client+r::manager)!=out.manager || ptr(base+r::recorder)!=out.recorder ||
         ptr(base+r::stream)!=out.stream || ptr(out.manager+r::lease)!=out.session ||
-        ptr(out.recorder+r::intervals_begin)!=begin || ptr(out.recorder+r::intervals_end)!=end) return {};
+        ptr(out.recorder+r::intervals_begin)!=begin || ptr(out.recorder+r::intervals_end)!=end ||
+        (out.playback && (!read(base+r::export_sequence,capture_after.data(),capture_after.size()) || capture!=capture_after))) return {};
     return out;
 }
 }
