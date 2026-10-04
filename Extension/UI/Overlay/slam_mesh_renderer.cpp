@@ -248,12 +248,16 @@ void render_slam_mesh(ID3D12Device* device,ID3D12GraphicsCommandList* commands,D
             // copied before compilation started.
             value=slam::presentation_snapshot();
         }
-        const bool normal_play=value.visuals.normal_play && value.normal_xray_available;
-        if ((!normal_play && (!value.visible || !value.xray_context_valid || value.result.cancelled)) || !value.mesh || !value.mesh_pose ||
+        const bool replay=value.replay_active && value.replay_available && value.visuals.replay;
+        const bool normal_play=!value.replay_active && value.visuals.normal_play && value.normal_xray_available;
+        if ((value.replay_active && !replay) ||
+            (!replay && !normal_play && (!value.visible || !value.xray_context_valid || value.result.cancelled)) || !value.mesh || !value.mesh_pose ||
             GetTickCount64()-value.mesh_pose->at_ms>=250) return;
+        const auto& shown_result=replay ? value.replay_result : normal_play ? value.normal_xray_result : value.result;
+        const auto& shown_events=replay ? value.replay_events : normal_play ? value.normal_xray_events : value.visual_events;
         const auto appearance=slam::visual_appearance(value.visuals,
-            normal_play ? value.normal_xray_result : value.result,
-            normal_play ? value.normal_xray_events : value.visual_events,GetTickCount64(),value.first_person,normal_play);
+            shown_result,shown_events,replay ? value.replay_time_ms : GetTickCount64(),
+            !replay && value.first_person,replay || normal_play);
         if (appearance.opacity<=.001f) return;
         slam::RenderCamera view;
         if (value.mesh_pose->render_camera) {
@@ -261,6 +265,7 @@ void render_slam_mesh(ID3D12Device* device,ID3D12GraphicsCommandList* commands,D
             // Reading a newer CPU camera here breaks that pairing in motion.
             view=*value.mesh_pose->render_camera;
         } else {
+            if (replay) return;
             auto fallback=latest_game_view();
             if (!fallback || !refresh_game_view(value.image_base,*fallback)) return;
             view.world=fallback->world; view.vertical_fov=fallback->vertical_fov;
@@ -284,7 +289,7 @@ void render_slam_mesh(ID3D12Device* device,ID3D12GraphicsCommandList* commands,D
         const auto focal=1/std::tan(view.vertical_fov*3.14159265f/360);
         constants.projection={focal*static_cast<float>(height)/static_cast<float>(width),focal,.05f,1000};
         constants.colors=appearance.colors;
-        const auto& fractures=normal_play ? value.normal_xray_events.fractures_at_ms : value.visual_events.fractures_at_ms;
+        const auto& fractures=replay ? value.replay_fracture_seeds : shown_events.fractures_at_ms;
         for (std::size_t part=0;part<slam::render_bone_count;++part) {
             if (!r.fracture_used[part] || !fractures[part] || fractures[part]==r.fracture_cached_at[part]) continue;
             const auto plane=slam::make_fracture_plane(r.mesh->rig.inverse_bind[part],r.fracture_low[part],r.fracture_high[part],

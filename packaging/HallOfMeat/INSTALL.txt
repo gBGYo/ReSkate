@@ -1,0 +1,23 @@
+ReSkate Hall of Meat 0.1.0 - Windows x64, Skate build 25414733
+
+1. Install ReSkate normally and run it once.
+2. Drag this mod ZIP onto the launcher, or extract all its files into:
+       Skate\Mods\ReSkate_HallOfMeat\
+3. CLOSE THE GAME AND LAUNCHER.
+4. Run Install.bat in that folder. Your existing DLL and launcher are backed up.
+5. Start ReSkateLauncher.exe. Press Insert, then Skater > SLAM > Start attempt.
+
+REMOVE: close the game and launcher; run Uninstall.bat in the same folder.
+Uninstall before deleting or updating the mod folder, to preserve your backup.
+Disabling the mod in the launcher's MODS list does not undo the binary replacement.
+
+This replaces ReSkate.dll and ReSkateLauncher.exe, like the trainer package.
+It does not include the trainer menu and cannot merge runtime replacement mods.
+Automatic binary updates and crash uploads are disabled in this build.
+
+See README.md for controls, features, compatibility and known prototype limits.
+Keep build-info.json beside Manage.ps1; the installer needs it to verify the files.
+
+For a nonstandard installation location, run in PowerShell:
+  .\Manage.ps1 -Action Install -GameDirectory 'D:\Games\Skate'
+  .\Manage.ps1 -Action Uninstall -GameDirectory 'D:\Games\Skate'

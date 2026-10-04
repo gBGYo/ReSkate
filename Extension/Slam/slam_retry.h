@@ -1,6 +1,7 @@
 #pragma once
 #include "slam_model.h"
 #include "Extension/Skater/skater_teleport.h"
+#include "Engine/Game/Multiplayer/session_tools.h"
 #include <algorithm>
 #include <cmath>
 #include <optional>
@@ -40,7 +41,7 @@ public:
         start_=std::move(start); status_="Starting location and orientation saved."; return true;
     }
     bool available(const RetryObservation& frame) const {
-        return start_ && !active() && same_scope(frame) && frame.allowed && frame.owned && frame.fresh && !frame.bailed && frame.owner==start_->owner;
+        return start_ && !active() && same_scope(frame) && frame.allowed && session_noclip_allowed() && frame.owned && frame.fresh && !frame.bailed && frame.owner==start_->owner;
     }
     bool retains_start(const RetryObservation& frame) const {
         return same_scope(frame) && (!frame.owned || frame.owner==start_->owner ||
@@ -54,6 +55,9 @@ public:
     }
     RetryStep step(const RetryObservation& frame,SkaterTeleportState native=SkaterTeleportState::busy) {
         if (!active()) return RetryStep::waiting;
+        if (!session_noclip_allowed()) {
+            cancel("Retry canceled: the host has turned off teleporting in this session."); return RetryStep::failed;
+        }
         if (!retains_start(frame) || !frame.allowed) {
             invalidate("Retry canceled: the skater, map or mode changed."); return RetryStep::failed;
         }

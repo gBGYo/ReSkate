@@ -109,6 +109,7 @@ add_library(dingosdk_runtime SHARED
     Extension/Slam/slam_visuals.cpp
     Extension/Slam/slam_audio.cpp
     Extension/Slam/slam_runtime.cpp
+    Extension/Slam/slam_replay.cpp
     Extension/Slam/slam_controls.cpp
     Extension/Skater/physics_tuning.cpp
     Extension/Multiplayer/Remote/remote_collision.cpp

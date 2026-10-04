@@ -6,9 +6,9 @@
 namespace dingosdk {
 // Engine settings that change how the game plays: the simulation clock (slow motion), physics,
 // skating, activities and throwdowns. While a multiplayer session runs, a player cannot change
-// them (the console, the debug settings editor) and their own changes are put back, so nobody
-// skates a throwdown in slow motion or with debug physics. ReSkate's own internal settings
-// changes are not affected.
+// them (the console, the debug settings editor) and their own changes are put back.
+// ReSkate's internal settings changes, including temporary Slam impact slow motion,
+// are not affected.
 namespace settings_lock_detail {
 // Groups as the console names them ("SimulationTime.TimeScale"); the debug settings catalog
 // names the same groups with "Settings" on the end ("SimulationTimeSettings").

@@ -60,6 +60,20 @@ ReSkate supports one game build at a time (Steam build `25414733`).
 
 The menu and console keys can be changed in the launcher's Settings.
 
+### Hall of Meat mod package
+
+To build a trainer-style Hall of Meat mod ZIP, run:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File contrib/pack-hall-of-meat.ps1
+```
+
+This builds and tests the Release runtime, disables automatic binary updates and crash uploads,
+and writes `artifacts/ReSkate_HallOfMeat-0.1.0.zip` with install/restore scripts and
+file-verification metadata. Drag the ZIP onto the launcher, close the game and launcher, and run
+`Install.bat` in the installed mod folder. Open **Skater → SLAM** to play. See
+[the package instructions](packaging/HallOfMeat/README.md) for compatibility and removal.
+
 ### Slam Challenge
 
 Open **Skater → SLAM** in the ReSkate menu and choose **Start attempt**, then take a fall.
@@ -68,7 +82,7 @@ It also works without an attempt when **X-ray in normal play** is on. **Skater �
 records and saves a different keyboard key or controller chord; controller is initially unbound.
 Release after menus, recovery or reconnecting before pressing again. Menu/console keys and controller
 chords overlapping Noclip or velocity boosts are disabled. **Bail now** and `slam bail` request the
-same transition. Manual bail requires offline play, No Bail, Noclip, Park Editor and First person off,
+same transition. Manual bail works in solo and ReSkate multiplayer with No Bail, Noclip, Park Editor and First person off,
 an owned local skater, and game focus. Manual bail requests the authored gameplay wipeout through its
 exact condition graph, only when that graph's ContextKey resolves to the verified local skater.
 The compiled output instructions verify the condition's byte binding and the weight's float binding.
@@ -79,7 +93,7 @@ world-space rigid body, rather than facing or animation. At entry it transfers h
 and bodies, preserving relative limb motion and native vertical/angular velocities. Constraints and
 recovery remain native. Gameplay requests expire after 500ms; captured velocity has a separate
 1.5-second limit and is discarded after entry, cancellation or an ownership change.
-All five Slam test suites pass. Forward riding, fakie and running off board passed the live playtest:
+All six Slam test suites pass. Forward riding, fakie and running off board passed the live playtest:
 bails start promptly and carry the existing direction of travel.
 Additional airborne steering and ragdoll controls are still unfinished.
 The HUD scores distinct impacts, fall distance, airtime and sliding. A skinned 3D X-ray mesh reuses the
@@ -108,11 +122,14 @@ The saved start lasts for this skater and map in the current session. **Cancel a
 the round; **Exit Slam** or **Dismiss results** hides its HUD. Console equivalents are `slam start`, `slam retry`, `slam bail`, `slam stop`,
 `slam dismiss` and `slam status`.
 
-The prototype requires offline play with No Bail, Noclip and the Park Editor off. Respawns, map changes,
+Slam works on your own local skater in solo and ReSkate multiplayer with No Bail, Noclip and the Park Editor off.
+Scores, injuries, X-ray and camera/audio effects stay on your client; peers see your falls through normal pose replication.
+Saved-start retry obeys the host's noclip/teleport permission. Multiplayer behavior still needs a two-client playtest.
+Respawns, map changes,
 teleports or lost physics telemetry cancel an active attempt. First person also blocks saved-start retry.
 The challenge picker, target HUD, completed results and persisted personal bests passed a live playtest.
 The new saved-start native return is implemented and covered by lifecycle tests; live validation is pending.
-The X-ray mesh loads once in the background when an attempt or normal-play X-ray first opens. It reads
+The X-ray mesh loads once in the background when an attempt, normal-play X-ray or replay X-ray first opens. It reads
 the player animation and native skinning buffers, including hands and corrective bones, and uses a
 separate depth buffer for the skeleton's own surfaces. On the supported build, it captures the native
 main rendering camera and skinning palette together rather than refreshing a CPU camera at overlay
@@ -125,6 +142,14 @@ Enable **X-ray in normal play** under **Skater → CAMERA** or **Skater → SLAM
 skeleton while skating without starting or resetting a Slam attempt. It follows successive falls,
 automatically clears injury highlights after recovery, and does not open the Slam score HUD.
 The same visibility settings apply; **During attempts** becomes **Always** in normal play.
+**X-ray in replay** under **Skater → SLAM → X-RAY** is enabled by default. It follows the replay
+editor's skater and camera, including paused views, and restores injuries and effect timing when
+you scrub forward or backward. It retains up to ten minutes of injury history from the current
+offline session, capped at 2,048 changed states. Loading, a different local skater or a reset
+recording clears that history. Recordings outside the retained history show neutral bones;
+injury-only filters can therefore hide them. Injury metadata is not saved with replay files.
+Replay suspends Slam scoring, manual bail, retries, sounds, camera effects and automatic slow motion.
+The overlay is drawn in the replay editor; inclusion in native video exports has not been verified.
 Choose **Always** and disable **Only impacted bones** for a continuously visible full skeleton, or
 choose **After impacts** with **Only impacted bones** for repeatable impact effects. The toggle is saved.
 Enable **Show only fractured bones** under **Skater → SLAM → X-RAY** to show only red broken bones,
@@ -137,7 +162,7 @@ fracture thresholds remain 160 and 225. Damage below the bruise threshold stays 
 by **Only impacted bones**. These are the same fracture rules used for scoring, fracture sounds and marks.
 Settings save automatically and apply to new attempts and the next normal-play fall; a fall already in
 progress retains its starting thresholds. Normal-play X-ray uses the selected damage rules too.
-Normal-play X-ray works with No Bail enabled; Noclip, Park Editor, loading and online play pause it.
+Normal-play X-ray works with No Bail enabled in solo and ReSkate multiplayer; Noclip, Park Editor and loading pause it.
 Enable **Only impacted bones** to hide untouched parts and reveal the body bones involved in detected
 contacts. A forearm hit reveals the forearm separately from the hand or upper arm. Fingers follow their
 hand collider. The native head-region bodies attach to Neck (101) and Neck1 (102); the latter now
@@ -184,7 +209,9 @@ skating, and playback stops on recovery, menus or focus loss.
 then smoothly returns to the previous game speed. Speed, duration (0.15–3 seconds), hold fraction
 and severity threshold are adjustable; further contacts cannot extend a running pulse. The new default
 is 30% speed for 0.85 seconds, holding for 45% of that duration before recovering. Existing saved
-durations and sound-off preferences are retained. Loading, online play, recovery, mode conflicts,
+durations and sound-off preferences are retained. Impact slow motion is also available in ReSkate multiplayer:
+it slows your client simulation while other players keep their own game speed. Its pulse duration uses real time.
+Loading, entering or leaving multiplayer, recovery, mode conflicts,
 an open menu or focus loss restore the prior speed. A later player or engine speed change takes priority.
 **Impact camera shake** adds a bounded 450ms punch-in and damped shake on severe hits or new fractures,
 with adjustable strength. It applies to the submitted gameplay view and the skeleton together,
@@ -330,7 +357,7 @@ The Slam suites also check impact timing, saved visual options and temporary spe
 
 ```powershell
 cmake --preset vs2022-x64 -DDINGOSDK_BUILD_SLAM_TESTS=ON
-cmake --build --preset release --target dingosdk_slam_tests dingosdk_slam_visuals_tests dingosdk_slam_settings_tests dingosdk_slam_bail_tests dingosdk_slam_retry_tests --parallel 4
+cmake --build --preset release --target dingosdk_slam_tests dingosdk_slam_visuals_tests dingosdk_slam_replay_tests dingosdk_slam_settings_tests dingosdk_slam_bail_tests dingosdk_slam_retry_tests --parallel 4
 ctest --test-dir build/vs2022-x64 -C Release --output-on-failure -R "^slam_"
 ```
 

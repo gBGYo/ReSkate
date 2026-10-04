@@ -1,0 +1,7 @@
+{
+  "name": "ReSkate_HallOfMeat",
+  "version_number": "0.1.0",
+  "website_url": "https://github.com/gBGYo/ReSkate",
+  "description": "Offline Hall of Meat for ReSkate: Slam challenges, impact scoring, injury X-ray, fractures, bail controls and saved-start retries.",
+  "dependencies": []
+}

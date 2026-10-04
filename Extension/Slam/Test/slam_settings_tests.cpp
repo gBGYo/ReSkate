@@ -82,7 +82,36 @@ void player_override_and_cleanup() {
     dingosdk::set_multiplayer_session_active(true);
     dingosdk::refresh_named_settings(false);
     check(!dingosdk::impact_time_scale_active() && fixture::value==1,"Entering multiplayer restores both the pulse and the player's locked speed override");
-    check(!dingosdk::begin_impact_time_scale(.3f),"Multiplayer refuses a new impact pulse");
+    check(dingosdk::player_change_named_setting("SimulationTime.TimeScale","0.6",false).starts_with("error"),
+        "Multiplayer still refuses manual game-speed overrides");
+    dingosdk::set_multiplayer_session_active(false);
+}
+void multiplayer_pulses() {
+    Image image;
+    dingosdk::set_multiplayer_session_active(true);
+    check(dingosdk::begin_impact_time_scale(.3f) && std::abs(fixture::value-.3f)<.0001f,
+        "A multiplayer impact can start a temporary local slow-motion pulse");
+    for (unsigned i=0;i<3;++i) dingosdk::refresh_named_settings(false);
+    check(dingosdk::impact_time_scale_active() && std::abs(fixture::value-.3f)<.0001f,
+        "Repeated multiplayer settings sweeps preserve the active impact pulse");
+    check(dingosdk::update_impact_time_scale(.7f) && std::abs(fixture::value-.7f)<.0001f,
+        "A multiplayer pulse can ease back toward normal speed");
+    check(dingosdk::restore_impact_time_scale() && fixture::value==1 && !dingosdk::impact_time_scale_active(),
+        "Finishing a multiplayer pulse restores the previous speed");
+    check(dingosdk::begin_impact_time_scale(.3f),"Another multiplayer pulse can start");
+    fixture::value=.9f; const auto writes=fixture::writes;
+    check(!dingosdk::update_impact_time_scale(.5f) && !dingosdk::impact_time_scale_active() && fixture::writes==writes,
+        "An external multiplayer speed change supersedes the pulse without a stale write");
+    fixture::value=1;
+    check(dingosdk::begin_impact_time_scale(.3f),"A multiplayer pulse can start before leaving the session");
+    dingosdk::set_multiplayer_session_active(false);
+    dingosdk::refresh_named_settings(false);
+    check(fixture::value==1 && !dingosdk::impact_time_scale_active(),
+        "Leaving multiplayer restores its active pulse during the next settings sweep");
+    check(dingosdk::begin_impact_time_scale(.3f),"An offline pulse can start before joining multiplayer");
+    dingosdk::set_multiplayer_session_active(true);
+    check(!dingosdk::update_impact_time_scale(.5f) && fixture::value==1 && !dingosdk::impact_time_scale_active(),
+        "A pulse update also restores speed when the session changes before a settings sweep");
     dingosdk::set_multiplayer_session_active(false);
 }
 void external_and_rejected_writes() {
@@ -111,7 +140,7 @@ void cleanup_thread_ownership() {
 }
 }
 int main() {
-    player_override_and_cleanup(); external_and_rejected_writes(); cleanup_thread_ownership();
+    player_override_and_cleanup(); multiplayer_pulses(); external_and_rejected_writes(); cleanup_thread_ownership();
     if (failures) return 1;
     std::cout<<"Slam time-scale settings ownership checks passed.\n";
 }

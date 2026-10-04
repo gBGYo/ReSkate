@@ -57,7 +57,7 @@ void breakdown(const slam::Result& result) {
 void slam_challenge_cards(SkateMenu& menu,const slam::Snapshot& value) {
     const auto& result=value.result;
     const bool active=running(result.phase);
-    begin_card(menu,"slam-challenge","CHOOSE A CHALLENGE","Offline Slam");
+    begin_card(menu,"slam-challenge","CHOOSE A CHALLENGE","Local Slam");
     auto config=value.selected_config;
     bool changed=false;
     ImGui::BeginDisabled(!value.challenge_options_ready);

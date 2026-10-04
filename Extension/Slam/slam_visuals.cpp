@@ -39,7 +39,7 @@ std::string encode_visual_options(const VisualOptions& v) {
     if (!valid_visual_options(v)) throw std::invalid_argument("Invalid Slam visual options");
     return Json{{"version",1},{"visibility",static_cast<unsigned>(v.visibility)},{"opacity",v.opacity},
         {"flash",v.flash_strength},{"impactSeconds",v.impact_duration_s},{"reduced",v.reduced_effects},
-        {"onlyImpacted",v.only_impacted},{"onlyFractured",v.only_fractured},{"normalPlay",v.normal_play},{"fractureMarks",v.fracture_marks},
+        {"onlyImpacted",v.only_impacted},{"onlyFractured",v.only_fractured},{"normalPlay",v.normal_play},{"replay",v.replay},{"fractureMarks",v.fracture_marks},
         {"impactSound",v.impact_sound},{"soundVolume",v.sound_volume},{"slowMotion",v.slow_motion},
         {"slowMotionScale",v.slow_motion_scale},{"slowMotionSeconds",v.slow_motion_seconds},
         {"impactCamera",v.impact_camera},{"cameraStrength",v.impact_camera_strength},
@@ -71,10 +71,10 @@ std::optional<VisualOptions> decode_visual_options(std::string_view text) noexce
             if (!doc.at("normalPlay").is_boolean()) return {};
             v.normal_play=doc.at("normalPlay").get<bool>();
         }
-        for (const auto& [name,field] : std::array<std::pair<std::string_view,bool*>,9>{{
+        for (const auto& [name,field] : std::array<std::pair<std::string_view,bool*>,10>{{
             {"fractureMarks",&v.fracture_marks},{"impactSound",&v.impact_sound},{"slowMotion",&v.slow_motion},
             {"impactCamera",&v.impact_camera},{"fractureSound",&v.fracture_sound},{"playerZoom",&v.player_zoom},
-            {"passOut",&v.pass_out},{"passOutHud",&v.pass_out_hud},{"onlyFractured",&v.only_fractured}}}) {
+            {"passOut",&v.pass_out},{"passOutHud",&v.pass_out_hud},{"onlyFractured",&v.only_fractured},{"replay",&v.replay}}}) {
             if (doc.contains(name)) {
                 if (!doc.at(name).is_boolean()) return {};
                 *field=doc.at(name).get<bool>();

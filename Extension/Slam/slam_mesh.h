@@ -66,6 +66,8 @@ struct MeshPose {
     // Never refresh only its camera or only its bones at Present.
     std::optional<RenderCamera> render_camera;
     std::uint64_t camera_at_ms{};
+    std::uintptr_t replay_session{};
+    double replay_time{};
 };
 PoseMatrix compose_matrices(const PoseMatrix& local, const PoseMatrix& parent) noexcept;
 SkeletonRig read_skeleton_rig(const frostbite::ebx::Document& document);

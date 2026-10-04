@@ -4,6 +4,8 @@
 #include "slam_pose_publication.h"
 #include "slam_audio.h"
 #include "slam_retry.h"
+#include "slam_replay.h"
+#include "slam_replay_native.h"
 #include "Extension/Multiplayer/Remote/native_pose_layout.h"
 #include "Extension/Multiplayer/Remote/native_skater.h"
 #include "Extension/Skater/no_bail.h"
@@ -19,6 +21,7 @@
 #include "Engine/Game/Build/20260929/slam.h"
 #include "Engine/Game/Build/20260929/client_source_spawn.h"
 #include "Engine/Game/UI/live_game_view.h"
+#include "Engine/Game/Multiplayer/session_tools.h"
 #include <Windows.h>
 #include <algorithm>
 #include <atomic>
@@ -32,7 +35,13 @@
 namespace dingosdk::slam {
 namespace {
 namespace layout = game::build::v20260929::slam;
-struct Watch { LocalBailOwner owner; std::uintptr_t client{}, component{}, holder{}; std::uint64_t until{}; };
+struct Watch {
+    LocalBailOwner owner;
+    std::uintptr_t client{}, component{}, holder{};
+    std::uint64_t until{};
+    bool replay{};
+    std::uintptr_t replay_session{},replay_stream{};
+};
 struct CompletedAttempt { std::uint64_t serial{}; std::string map; Result result; };
 struct State {
     std::mutex mutex;
@@ -47,6 +56,11 @@ struct State {
     SavedStartRetry retry;
     std::atomic<std::uint64_t> level_generation{1};
     FreeplayXray normal_xray;
+    ReplayVisualHistory replay_history;
+    std::uintptr_t history_recorder{},history_stream{},history_entity{};
+    std::uint64_t history_generation{};
+    bool replay_contracts_checked{};
+    std::atomic<bool> replay_contracts_ok{};
     Snapshot published;
     Frame last;
     std::optional<Action> pending;
@@ -60,12 +74,15 @@ struct State {
     bool render_caller_logged{};
     bool render_hook_checked{},render_hook_ok{},render_instance_logged{};
     std::uintptr_t render_object{};
+    std::uintptr_t last_render_object{};
+    LocalBailOwner last_visual_owner;
     std::uint32_t render_source_changes{};
     std::shared_ptr<const MeshPose> raster_pose;
     void (*original_render_instance)(std::uintptr_t,std::uintptr_t){};
     bool cache_hook_checked{},cache_hook_ok{},cache_logged{};
     std::uint32_t (*original_render_cache)(std::uintptr_t,std::uintptr_t){};
     bool view_hook_checked{},view_hook_ok{},view_logged{};
+    bool replay_view_logged{};
     std::atomic<bool> camera_contracts_ok{};
     void (*original_render_view)(std::uintptr_t,std::uintptr_t,std::uintptr_t,std::uint8_t){};
     std::uint64_t visuals_save_at{};
@@ -133,6 +150,54 @@ std::uintptr_t pointer(std::uintptr_t address) {
     std::uintptr_t p{};
     return read(address, p) && p >= 0x10000 && p <= memory::highest_user_address - 0x10000 ? p : 0;
 }
+std::optional<ReplayClock> replay_clock(std::uintptr_t base) {
+    if (!state().replay_contracts_ok) return {};
+    return read_replay_clock(base,[](std::uintptr_t at,void* out,std::size_t size) {return memory::peek_bytes(at,out,size);});
+}
+bool replay_mode(std::uintptr_t base) {
+    if (!state().replay_contracts_ok) return false;
+    namespace r=game::build::v20260929::replay;
+    std::uint8_t active{};
+    // A torn clock read must still suspend gameplay effects and scoring.
+    return (read(base+r::playing,active) && active) ||
+        pointer(pointer(pointer(base+r::client)+r::manager)+r::lease)!=0;
+}
+bool resolve_replay_actor(std::uintptr_t base,std::uintptr_t client,LocalBailOwner& out) {
+    namespace e=game::build::v20260929::engine;
+    unsigned offset{};
+    if (pointer(client)!=base+e::client_vtable || !read(base+e::context_player_manager_offset,offset) || offset>0x1000000) return false;
+    const auto world=pointer(client+8),manager=pointer(world+offset);
+    const auto begin=pointer(manager+0x4c8),end=pointer(manager+0x4d0);
+    if (!world || pointer(manager)!=base+e::local_player_manager_vtable || !begin || end!=begin+8) return false;
+    const auto player=pointer(begin),entity=pointer(player+0xb8);
+    std::uint8_t local{},remote{};
+    if (pointer(player)!=base+e::local_player_vtable || pointer(player+0x78)!=world ||
+        !read(player+0x45,local) || local!=1 || !read(player+0x44,remote) || remote ||
+        pointer(entity)!=base+e::skater_entity_vtable || pointer(entity+0x20)!=world || pointer(entity+0xf8)!=player ||
+        pointer(pointer(player+0xb0))!=entity+8 || pointer(pointer(entity+0x70))!=entity) return false;
+    // A visual identity deliberately carries no physics core, rig or selector.
+    // It can never authorize a bail, teleport or telemetry capture.
+    out={base,entity,world,0,0,0,0};
+    return true;
+}
+bool valid_visual_watch(const Watch& watch,LocalBailOwner& current) {
+    if (!watch.replay) return !replay_mode(watch.owner.base) &&
+        resolve_local_bail_owner(watch.client,watch.owner.entity,current) && current==watch.owner;
+    if (state().effects_suspended.load(std::memory_order_acquire)) return false;
+    const auto clock=replay_clock(watch.owner.base);
+    return clock && clock->playback && clock->session==watch.replay_session && clock->stream==watch.replay_stream &&
+        resolve_replay_actor(watch.owner.base,watch.client,current) && current==watch.owner;
+}
+void publish_replay_visuals(State& s,double time,std::uintptr_t entity) {
+    auto& out=s.published;
+    out.replay_time_ms=ReplayVisualHistory::milliseconds(time);
+    const auto frame=entity==s.history_entity ? s.replay_history.sample(time) : std::nullopt;
+    out.replay_injuries_known=frame.has_value();
+    out.replay_result=frame ? frame->result : Result{};
+    if (!frame) out.replay_result.config=out.selected_config;
+    out.replay_events=frame ? frame->events : VisualEvents{};
+    out.replay_fracture_seeds=frame ? frame->fracture_seeds : std::array<std::uint64_t,injury_bone_count>{};
+}
 bool finite(const Vec3& v) {
     return std::all_of(v.begin(), v.end(), [](float x) { return std::isfinite(x) && std::abs(x) < 1000000; });
 }
@@ -170,6 +235,26 @@ std::uint32_t local_render_index(const Watch& watch,unsigned slot) {
     const auto r2=pool_record(managers[1]+0xc8,h2-2,0x68);
     if (!r2 || !read(r2+0x0c,h3) || h3<2) return UINT32_MAX;
     return h3-2;
+}
+bool local_render_object(const Watch& watch,std::uintptr_t object) {
+    std::uint32_t index{};
+    if (pointer(object)!=watch.owner.base+layout::render_instance_vtable || !read(object+0x108,index)) return false;
+    if (!watch.replay) return index==local_render_index(watch,0) || index==local_render_index(watch,1);
+    namespace r=game::build::v20260929::replay;
+    const auto source=read_replay_render_key(watch.owner.base,object,
+        [](std::uintptr_t at,void* out,std::size_t size) {return memory::peek_bytes(at,out,size);});
+    if (!source) return false;
+    const auto manager=pointer(watch.owner.base+layout::render_managers[2]);
+    if (!manager || pointer(manager)!=watch.owner.base+layout::render_manager_vtables[2]) return false;
+    for (unsigned slot=0;slot<2;++slot) {
+        const auto logical=local_render_index(watch,slot);
+        if (logical==UINT32_MAX) continue;
+        const auto record=pool_record(manager+0xc8,logical,r::skinned_state_stride);
+        std::uint64_t key{};
+        if (record && pointer(record)==watch.owner.base+r::skinned_state_vtable &&
+            read(record+r::source_key,key) && key==*source) return true;
+    }
+    return false;
 }
 bool refresh_render_pose(const Watch& watch,std::uintptr_t object,const SkeletonMesh& mesh,MeshPose& output) {
     // Read the same fields exported by 48db8e0. Never invoke skinning or
@@ -220,10 +305,8 @@ void render_instance_hook(std::uintptr_t object,std::uintptr_t packet) {
         {std::lock_guard lock(s.mutex); watch=s.watch; mesh=s.published.mesh;}
         if (!mesh || GetTickCount64()>=watch.until) return;
         LocalBailOwner current;
-        if (!resolve_local_bail_owner(watch.client,watch.owner.entity,current) || current!=watch.owner) return;
-        bool local{};
-        for (unsigned slot=0;slot<2;++slot) local=local || index==local_render_index(watch,slot);
-        if (!local) return;
+        if (!valid_visual_watch(watch,current)) return;
+        if (!local_render_object(watch,object)) return;
         {
             std::lock_guard lock(s.mutex);
             if (!s.render_instance_logged) {
@@ -273,8 +356,9 @@ void render_instance_hook(std::uintptr_t object,std::uintptr_t packet) {
         auto next=std::make_shared<MeshPose>();
         if (!place_packed_render_skin(*mesh,bones,placement,*next)) return;
         next->at_ms=GetTickCount64(); next->render_export=true; next->native_draw=true;
+        next->replay_session=watch.replay_session;
         std::lock_guard lock(s.mutex);
-        if (s.watch.owner!=current || s.watch.holder!=watch.holder || GetTickCount64()>=s.watch.until) return;
+        if (s.watch.owner!=current || s.watch.holder!=watch.holder || s.watch.replay_session!=watch.replay_session || GetTickCount64()>=s.watch.until) return;
         next->sequence=++s.published.rendered_poses;
         s.published.mesh_pose=std::move(next);
         // Bound source diagnostics per process. Inactive riding/walking
@@ -288,6 +372,7 @@ void render_instance_hook(std::uintptr_t object,std::uintptr_t packet) {
                 local_render_index(watch,0),local_render_index(watch,1),GetCurrentThreadId());
         }
         s.render_object=object;
+        if (!watch.replay) {s.last_render_object=object; s.last_visual_owner=current;}
     } catch (...) {}
 }
 bool install_render_hook(std::uintptr_t base) {
@@ -311,7 +396,7 @@ std::uint32_t render_cache_hook(std::uintptr_t object,std::uintptr_t packet) {
         {std::lock_guard lock(s.mutex); if (s.cache_logged) return changed; watch=s.watch; native=s.render_object;}
         if (!native || GetTickCount64()>=watch.until || pointer(object+0x60)!=native) return changed;
         LocalBailOwner current;
-        if (!resolve_local_bail_owner(watch.client,watch.owner.entity,current) || current!=watch.owner) return changed;
+        if (!valid_visual_watch(watch,current)) return changed;
         const auto begin=pointer(object+0x10),end=pointer(object+0x18);
         if (!begin || !end || end<begin || (end-begin)%8 || end-begin>512) return changed;
         std::string callbacks;
@@ -353,9 +438,9 @@ std::optional<ImpactViews> impact_views(std::uintptr_t current_view,std::uintptr
         std::lock_guard lock(s.mutex);
         watch=s.watch; impulse=s.camera_impact; zoom=s.player_zoom; target=s.last.center;
         follow_seconds=s.published.visuals.player_follow_seconds;
-        if (s.published.first_person) return {};
+        if (s.published.first_person || watch.replay) return {};
     }
-    if (GetTickCount64()>=watch.until) return {};
+    if (GetTickCount64()>=watch.until || replay_mode(watch.owner.base)) return {};
     auto camera=latest_game_view();
     // Freecam and first person own their camera. This response only layers
     // over the ordinary local gameplay view, never over those features.
@@ -435,41 +520,68 @@ void render_view_hook(std::uintptr_t blackboard,std::uintptr_t current_view,
             watch=s.watch; object=s.render_object; mesh=s.published.mesh; producer=s.published.mesh_pose;
         }
         if (GetTickCount64()>=watch.until || current_view<0x10050) return;
-        // Only the main native raster view. Reflection, shadow, editor and
-        // effect views must not establish the local character camera.
+        // Only the main native raster view. Reflections, shadows and effect
+        // views cannot establish the character's presentation camera.
         std::uint32_t kind{};
         std::array<std::byte,320> input{},verified{};
         RenderCamera render_camera;
         if (!read(current_view-0x50+0x18,kind) || kind || !read(current_view,input) ||
             !decode_render_camera(input,render_camera)) return;
-        auto camera=latest_game_view();
-        if (!camera || !refresh_game_view(watch.owner.base,*camera)) return;
-        const auto& world=render_camera.world;
-        const Vec3 delta{world[12]-camera->world[12],world[13]-camera->world[13],world[14]-camera->world[14]};
-        if (!finite(delta) || length(delta)>10) return;
+        Vec3 delta{};
+        std::optional<ReplayClock> clock;
+        if (watch.replay) {
+            clock=replay_clock(watch.owner.base);
+            if (!clock || !clock->playback || clock->session!=watch.replay_session || clock->stream!=watch.replay_stream) return;
+        } else {
+            auto camera=latest_game_view();
+            if (!camera || !refresh_game_view(watch.owner.base,*camera)) return;
+            const auto& world=render_camera.world;
+            delta={world[12]-camera->world[12],world[13]-camera->world[13],world[14]-camera->world[14]};
+            if (!finite(delta) || length(delta)>10) return;
+        }
         LocalBailOwner owner;
-        if (!resolve_local_bail_owner(watch.client,watch.owner.entity,owner) || owner!=watch.owner) return;
-        if (!object || !mesh || !producer || !producer->native_draw ||
-            GetTickCount64()-producer->at_ms>=250 || pointer(object)!=owner.base+layout::render_instance_vtable) return;
-        std::uint32_t index{};
-        if (!read(object+0x108,index) ||
-            (index!=local_render_index(watch,0) && index!=local_render_index(watch,1))) return;
+        if (!valid_visual_watch(watch,owner)) return;
+        // Replay restores the renderer cache and can skip the live animation
+        // getter entirely. Its visible palette is read directly under the
+        // session/actor lease; a fresh physics/animation producer is unnecessary.
+        if (!object || !mesh || (!watch.replay && (!producer || !producer->native_draw ||
+            GetTickCount64()-producer->at_ms>=250 || producer->replay_session)) ||
+            pointer(object)!=owner.base+layout::render_instance_vtable) return;
+        if (!local_render_object(watch,object)) return;
         auto next=std::make_shared<MeshPose>();
         if (!refresh_render_pose(watch,object,*mesh,*next) || !read(current_view,verified) || input!=verified ||
             !read(current_view-0x50+0x18,kind) || kind) return;
         LocalBailOwner after;
-        if (!resolve_local_bail_owner(watch.client,watch.owner.entity,after) || after!=owner) return;
+        if (!valid_visual_watch(watch,after) || !local_render_object(watch,object)) return;
+        if (clock) {
+            const auto verified_clock=replay_clock(owner.base);
+            if (!verified_clock || verified_clock->session!=clock->session || verified_clock->stream!=clock->stream ||
+                verified_clock->time!=clock->time) return;
+        }
         if (impact) {
             if (impact->owner!=owner || input!=impact->source_current) return;
             render_camera=impact->camera;
         }
         // Keep the producer lease. A render-camera update cannot keep a
         // stopped or hidden character's old palette alive indefinitely.
-        next->at_ms=producer->at_ms; next->sequence=producer->sequence;
+        // A paused replay still publishes scene views. Refreshing the verified,
+        // visible native palette here keeps it paired with the editor camera.
+        next->at_ms=watch.replay ? GetTickCount64() : producer->at_ms;
+        next->sequence=producer ? producer->sequence : 0;
         next->native_draw=next->render_export=true;
         next->render_camera=render_camera; next->camera_at_ms=GetTickCount64();
+        next->replay_session=watch.replay_session;
+        next->replay_time=clock ? clock->time : 0;
         std::lock_guard lock(s.mutex);
-        if (s.watch.owner!=owner || s.watch.holder!=watch.holder || s.render_object!=object || GetTickCount64()>=s.watch.until) return;
+        if (s.watch.owner!=owner || s.watch.holder!=watch.holder || s.watch.replay_session!=watch.replay_session ||
+            s.render_object!=object || GetTickCount64()>=s.watch.until) return;
+        if (clock) publish_replay_visuals(s,clock->time,owner.entity);
+        if (clock && !s.replay_view_logged) {
+            s.replay_view_logged=true;
+            logging::log(logging::Level::info,logging::Channel::graphics,
+                "X-ray replay raster ready: session {:#x}, actor {:#x}, time {:.3f}s, injury history {}.",
+                clock->session,owner.entity,clock->time,s.published.replay_injuries_known ? "matched" : "unavailable");
+        }
         s.raster_pose=std::move(next);
         if (!s.view_logged) {
             s.view_logged=true;
@@ -633,12 +745,13 @@ void publish_result(State& s) {
     s.published.result = s.challenge.result();
     if (s.published.xray_context_valid) s.published.visual_events.observe(s.published.result,GetTickCount64());
     else s.published.visual_events.reset();
-    s.visible.store(s.published.visible, std::memory_order_release);
+    s.visible.store(s.published.visible && !s.published.replay_active, std::memory_order_release);
     const bool impact_visibility=s.published.visuals.visibility==XrayVisibility::impact;
     s.published.normal_xray_result=impact_visibility ? s.normal_xray.impact_result() : s.normal_xray.result();
     s.published.normal_xray_events=impact_visibility ? s.normal_xray.impact_events() : s.normal_xray.events();
     s.draw_active.store(s.published.visible ||
-        (s.published.visuals.normal_play && s.published.normal_xray_available),std::memory_order_release);
+        (s.published.visuals.normal_play && s.published.normal_xray_available) ||
+        (s.published.visuals.replay && (s.published.replay_available || s.published.normal_xray_available)),std::memory_order_release);
 }
 void unwatch(State& s) {
     s.rig.store(0, std::memory_order_release);
@@ -683,8 +796,25 @@ Snapshot presentation_snapshot() {
         LocalBailOwner current;
         if (GetTickCount64()>=watch.until || GetTickCount64()-result.mesh_pose->at_ms>=250 ||
             (result.mesh_pose->render_camera && GetTickCount64()-result.mesh_pose->camera_at_ms>=250) ||
-            !resolve_local_bail_owner(watch.client,watch.owner.entity,current) || current!=watch.owner) {
+            !valid_visual_watch(watch,current)) {
             result.mesh_pose.reset();
+        } else if (watch.replay) {
+            const auto clock=replay_clock(watch.owner.base);
+            if (!result.mesh_pose->render_camera || !clock || !clock->playback ||
+                result.mesh_pose->replay_session!=clock->session || std::abs(clock->time-result.mesh_pose->replay_time)>.05)
+                result.mesh_pose.reset();
+            else {
+                // Injury state and effect age belong to the submitted pose's
+                // time, never to a newer client tick or wall-clock Present.
+                std::lock_guard lock(s.mutex);
+                if (s.watch.replay_session!=watch.replay_session || s.watch.owner!=watch.owner) result.mesh_pose.reset();
+                else {
+                    publish_replay_visuals(s,result.mesh_pose->replay_time,watch.owner.entity);
+                    result.replay_result=s.published.replay_result; result.replay_events=s.published.replay_events;
+                    result.replay_fracture_seeds=s.published.replay_fracture_seeds;
+                    result.replay_injuries_known=s.published.replay_injuries_known; result.replay_time_ms=s.published.replay_time_ms;
+                }
+            }
         } else if (result.mesh_pose->native_draw && !result.mesh_pose->render_camera && result.mesh && object) {
             std::uint32_t index{}; std::uint8_t visible{};
             if (pointer(object)!=current.base+layout::render_instance_vtable ||
@@ -764,11 +894,26 @@ PassOutFrame pass_out_frame() noexcept {
     } catch (...) {return {};}
 }
 void tick(std::uintptr_t base, std::uintptr_t client, std::uintptr_t entity, bool ready,
-    bool offline, bool no_bail, bool noclip, bool editor, bool first_person, std::string_view map) noexcept {
+    bool no_bail, bool noclip, bool editor, bool first_person, std::string_view map) noexcept {
     try {
         auto& s = state();
+        if (!s.replay_contracts_checked) {
+            s.replay_contracts_checked=true;
+            bool valid=true;
+            for (const auto& contract : {game::build::v20260929::replay::playback_clock,game::build::v20260929::replay::recording_clock}) {
+                std::array<unsigned char,32> actual{};
+                if (!read(base+contract.rva,actual) || actual!=contract.bytes) valid=false;
+            }
+            s.replay_contracts_ok.store(valid,std::memory_order_release);
+        }
+        const auto clock=replay_clock(base);
+        const bool replaying=replay_mode(base);
+        const bool offline=!multiplayer_session_active();
         LocalBailOwner owner;
-        const bool owned = ready && offline && !noclip && !editor &&
+        LocalBailOwner replay_actor;
+        const bool replay_owned=replaying && offline && !editor && clock && clock->playback &&
+            resolve_replay_actor(base,client,replay_actor);
+        const bool owned = !replaying && ready && !noclip && !editor &&
             resolve_local_bail_owner(client, entity, owner);
         // Multiplayer exits before installing these hooks in solo play. Slam
         // must initialize the shared hooks on the client thread itself. Do
@@ -778,9 +923,9 @@ void tick(std::uintptr_t base, std::uintptr_t client, std::uintptr_t entity, boo
             std::string detail;
             s.pose_hooks_ok = multiplayer::install_entity_hooks(base, detail);
             logging::log(s.pose_hooks_ok ? logging::Level::info : logging::Level::warning, logging::Channel::skater,
-                "Slam overlay hooks: {}", s.pose_hooks_ok ? "ready for offline animation capture" : detail);
+                "Slam overlay hooks: {}", s.pose_hooks_ok ? "ready for local animation capture" : detail);
         }
-        if (owned && !s.render_hook_checked) {
+        if ((owned || replay_owned) && !s.render_hook_checked) {
             s.render_hook_checked=true;
             s.render_hook_ok=install_render_hook(base);
             logging::log(logging::Level::info,logging::Channel::graphics,"X-ray native presentation hook: {}.",s.render_hook_ok ? "ready" : "unavailable");
@@ -790,7 +935,7 @@ void tick(std::uintptr_t base, std::uintptr_t client, std::uintptr_t entity, boo
             s.cache_hook_ok=install_cache_hook(base);
             logging::log(logging::Level::info,logging::Channel::graphics,"X-ray renderer cache observer: {}.",s.cache_hook_ok ? "ready" : "unavailable");
         }
-        if (owned && !s.view_hook_checked) {
+        if ((owned || replay_owned) && !s.view_hook_checked) {
             s.view_hook_checked=true;
             s.view_hook_ok=install_view_hook(base);
             logging::log(logging::Level::info,logging::Channel::graphics,"X-ray raster view observer: {}.",s.view_hook_ok ? "ready" : "unavailable");
@@ -798,6 +943,25 @@ void tick(std::uintptr_t base, std::uintptr_t client, std::uintptr_t entity, boo
         std::unique_lock lock(s.mutex);
         s.published.image_base = base;
         s.published.first_person=first_person;
+        const bool was_replay=s.published.replay_active;
+        if (was_replay!=replaying) {
+            s.replay_view_logged=false;
+            logging::log(logging::Level::info,logging::Channel::graphics,
+                "X-ray replay {}: actor binding {}, clock {}, retained injury states {}.",
+                replaying ? "entered" : "exited",replay_owned ? "ready" : "unavailable",
+                clock ? "ready" : "unavailable",s.replay_history.size());
+        }
+        s.published.replay_active=replaying;
+        s.published.replay_available=replay_owned && s.render_hook_ok && s.view_hook_ok && !s.effects_suspended.load();
+        const auto generation=s.level_generation.load();
+        if (s.history_generation!=generation || (owned && !s.map.empty() && s.map!=map) ||
+            (clock && (s.history_recorder!=clock->recorder || s.history_stream!=clock->stream)) ||
+            (owned && s.history_entity && s.history_entity!=owner.entity)) {
+            s.replay_history.reset(); s.history_entity=0;
+            s.last_render_object=0; s.last_visual_owner={};
+            s.history_generation=generation;
+            s.history_recorder=clock ? clock->recorder : 0; s.history_stream=clock ? clock->stream : 0;
+        }
         constexpr std::string_view config_key="Slam.Challenge.v1";
         constexpr std::string_view visuals_key="Slam.Visuals.v1";
         constexpr std::string_view controls_key="Slam.Controls.v1";
@@ -831,7 +995,7 @@ void tick(std::uintptr_t base, std::uintptr_t client, std::uintptr_t entity, boo
         }
         // The physics hook only queues an immutable completed result. Drain
         // it here before processing a new start or a map/owner transition.
-        if (offline && ready) {
+        if (ready) {
             for (const auto& attempt : s.completed_attempts) {
                 const auto recorded=s.best_book.record(attempt.serial,attempt.map,attempt.result,read_best,write_best);
                 if (!recorded) continue;
@@ -874,7 +1038,7 @@ void tick(std::uintptr_t base, std::uintptr_t client, std::uintptr_t entity, boo
                     s.published.selected_best.score,s.published.selected_best.attempts);
             }
         }
-        if (owned && !s.published.visual_options_ready) {
+        if ((owned || replay_owned) && !s.published.visual_options_ready) {
             if (const auto saved=profile_runtime::local_value(visuals_key)) {
                 const auto decoded=saved->is_string() ? decode_visual_options(saved->string()) : std::nullopt;
                 if (decoded) {
@@ -891,7 +1055,7 @@ void tick(std::uintptr_t base, std::uintptr_t client, std::uintptr_t entity, boo
             s.normal_play_observed=s.published.visuals.normal_play;
             logging::log(logging::Level::info,logging::Channel::skater,"Normal-play X-ray {}.",s.normal_play_observed ? "enabled" : "disabled");
         }
-        if (offline && ready && s.visuals_save_at && GetTickCount64()>=s.visuals_save_at) {
+        if ((ready || replay_owned) && s.visuals_save_at && GetTickCount64()>=s.visuals_save_at) {
             s.visuals_save_at=0;
             const auto encoded=encode_visual_options(s.published.visuals);
             profile_runtime::set_local_values({{std::string(visuals_key),encoded}});
@@ -902,17 +1066,18 @@ void tick(std::uintptr_t base, std::uintptr_t client, std::uintptr_t entity, boo
                 "Slam X-ray settings: {}",s.published.visual_save_status);
         }
         if (!s.contracts_checked && no_bail_available()) { s.contracts_ok = contracts(base); s.contracts_checked = true; }
-        const char* visual_issue = !offline ? "X-ray requires offline play." :
+        const char* visual_issue = replaying ? "Replay editor is open; gameplay Slam controls are suspended." :
             noclip ? "Turn off Noclip before starting an attempt." :
             editor ? "Exit the park editor before starting an attempt." :
             !s.contracts_ok ? "Slam telemetry is unavailable for this game build." :
-            !owned ? "Waiting for an offline local skater." :
+            !owned ? "Waiting for a local skater." :
             !s.pose_hooks_ok ? "Slam skeleton overlay is unavailable for this game build." : nullptr;
         const bool changed = s.watch.owner.entity && (owner != s.watch.owner || map != s.map);
         const char* issue = visual_issue ? visual_issue : no_bail ? "Turn off No Bail before starting an attempt." : nullptr;
         if (visual_issue || changed) {
             s.challenge.cancel(visual_issue ? visual_issue : "Attempt cancelled: the skater or map changed.");
-            unwatch(s);
+            if (!replaying || !was_replay || !replay_owned || !s.watch.replay ||
+                s.watch.owner!=replay_actor || s.watch.replay_session!=clock->session || s.watch.replay_stream!=clock->stream) unwatch(s);
         }
         if (no_bail) {
             s.challenge.cancel(issue);
@@ -926,6 +1091,14 @@ void tick(std::uintptr_t base, std::uintptr_t client, std::uintptr_t entity, boo
             s.animation_component.store(component, std::memory_order_release);
             s.rig.store(owner.rig, std::memory_order_release);
             s.selector.store(owner.selector, std::memory_order_release);
+        } else if (s.published.replay_available) {
+            s.watch={replay_actor,client,0,0,GetTickCount64()+500,true,clock->session,clock->stream};
+            if (!s.render_object && s.last_visual_owner.base==replay_actor.base &&
+                s.last_visual_owner.entity==replay_actor.entity && s.last_visual_owner.world==replay_actor.world &&
+                pointer(s.last_render_object)==base+layout::render_instance_vtable) {
+                if (local_render_object(s.watch,s.last_render_object)) s.render_object=s.last_render_object;
+            }
+            publish_replay_visuals(s,clock->time,replay_actor.entity);
         }
         s.published.normal_xray_available=!visual_issue;
         s.map = map;
@@ -982,7 +1155,7 @@ void tick(std::uintptr_t base, std::uintptr_t client, std::uintptr_t entity, boo
         retry_frame.generation=s.level_generation.load(); retry_frame.now=GetTickCount64(); retry_frame.sample_at=s.last_at;
         // Ownership can be temporarily unavailable during our native teleport.
         // Only the submitted retry may wait through that gap; it cannot dispatch.
-        retry_frame.allowed=offline && !no_bail && !noclip && !editor && !first_person && !s.effects_suspended.load();
+        retry_frame.allowed=!replaying && !no_bail && !noclip && !editor && !first_person && !s.effects_suspended.load();
         retry_frame.owned=owned; retry_frame.fresh=s.published.available; retry_frame.bailed=s.last.bailed;
         retry_frame.pose_valid=owned && read_actor_world(owner,retry_frame.transform);
         if (retry_frame.pose_valid) {retry_frame.transform[3]=retry_frame.transform[7]=retry_frame.transform[11]=0; retry_frame.transform[15]=1;}
@@ -1006,7 +1179,7 @@ void tick(std::uintptr_t base, std::uintptr_t client, std::uintptr_t entity, boo
         s.published.saved_start=s.retry.saved().has_value();
         s.published.retry_active=s.retry.active();
         s.published.retry_available=!s.challenge.running() && s.retry.available(retry_frame);
-        s.published.retry_status=s.retry.status();
+        s.published.retry_status=session_noclip_allowed() ? s.retry.status() : "The host has turned off teleporting in this session.";
         const auto& controls=s.published.bail_controls;
         const auto keys=launcher::overlay_keys();
         s.published.bail_key_conflict=controls.key && (controls.key==keys.menu || controls.key==keys.console);
@@ -1054,7 +1227,8 @@ void tick(std::uintptr_t base, std::uintptr_t client, std::uintptr_t entity, boo
         s.published.manual_bails_queued=manual.queued;
         s.published.manual_bails_selected=manual.selected;
         s.published.manual_bails_published=manual.published;
-        if ((s.published.visible || s.published.visuals.normal_play) && !s.mesh_started && owned) {
+        if ((s.published.visible || s.published.visuals.normal_play || s.published.visuals.replay) &&
+            !s.mesh_started && (owned || replay_owned)) {
             s.mesh_started=true;
             s.published.mesh_status="Loading Dem Bones from the installed game...";
             try {
@@ -1085,6 +1259,12 @@ void tick(std::uintptr_t base, std::uintptr_t client, std::uintptr_t entity, boo
             s.challenge.cancel("Attempt cancelled: physics telemetry stopped.");
         if (GetTickCount64()-s.last_at>500) s.normal_xray.reset();
         publish_result(s);
+        if (owned && clock && !clock->playback && s.published.visuals.replay && s.last.valid && GetTickCount64()-s.last_at<250) {
+            s.history_entity=owner.entity;
+            const bool attempt=s.published.xray_context_valid;
+            s.replay_history.record(clock->time,attempt ? s.published.result : s.published.normal_xray_result,
+                attempt ? s.published.visual_events : s.published.normal_xray_events,GetTickCount64());
+        }
         const auto effects_options=s.published.visuals;
         const auto effects_events=effects_options.normal_play ? s.normal_xray.events() : s.published.visual_events;
         const bool effects_allowed=!visual_issue && !s.effects_suspended.load(std::memory_order_acquire) &&
@@ -1105,7 +1285,7 @@ void tick(std::uintptr_t base, std::uintptr_t client, std::uintptr_t entity, boo
         // them with no Slam mutex held; presentation only reads the result.
         lock.unlock();
         SkaterTeleportSubmission retry_submission;
-        if (retry_dispatch && retry_dispatch->generation==s.level_generation.load() && ready && offline &&
+        if (retry_dispatch && retry_dispatch->generation==s.level_generation.load() && ready && session_noclip_allowed() &&
             !no_bail && !noclip && !editor && !first_person && !s.effects_suspended.load())
             retry_submission=submit_owned_skater_teleport(client,retry_dispatch->owner,retry_dispatch->transform);
         const auto pulse=update_time_effect(effects_options,effects_events,camera_allowed);
@@ -1189,7 +1369,7 @@ void observe_skeleton(std::uintptr_t rig, float seconds, bool wipeout) noexcept 
         Watch watch;
         { std::lock_guard lock(s.mutex); watch = s.watch; }
         LocalBailOwner current;
-        if (rig != watch.owner.rig || GetTickCount64() >= watch.until ||
+        if (watch.replay || replay_mode(watch.owner.base) || rig != watch.owner.rig || GetTickCount64() >= watch.until ||
             !resolve_local_bail_owner(watch.client, watch.owner.entity, current) || current != watch.owner) return;
         std::lock_guard lock(s.mutex);
         if (s.watch.owner != current || GetTickCount64() >= s.watch.until) return;
@@ -1217,7 +1397,7 @@ void observe_skeleton(std::uintptr_t rig, float seconds, bool wipeout) noexcept 
         }
         const auto previous_phase = s.challenge.result().phase;
         s.challenge.step(frame);
-        if (s.published.visuals.normal_play) {
+        if (s.published.visuals.normal_play || s.published.visuals.replay) {
             const auto previous_impacts=s.normal_xray.result().impacts;
             s.normal_xray.step(frame,GetTickCount64(),s.published.selected_config.scoring);
             if (s.normal_xray.result().impacts>previous_impacts)

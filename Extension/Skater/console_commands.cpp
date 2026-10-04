@@ -19,6 +19,11 @@ void register_movement_commands(Commands &registry) {
             out(std::format("{} Manual bails queued: {}, selected: {}, animation published: {}.",
                 value.bail_status,value.manual_bails_queued,value.manual_bails_selected,value.manual_bails_published));
             out(value.retry_status);
+            if (value.replay_active)
+                out(std::format("Replay X-ray: {} | {:.3f}s | injury history {}.",
+                    value.replay_available ? "ready" : "waiting for the local render actor",
+                    static_cast<double>(value.replay_time_ms)/1000,
+                    value.replay_injuries_known ? "matched" : "unavailable (neutral bones)"));
         } else {
             const auto request = operation == "stop" ? slam::Action::stop : operation == "dismiss" ? slam::Action::dismiss :
                 operation=="bail" ? slam::Action::bail : operation=="retry" ? slam::Action::retry : slam::Action::start;

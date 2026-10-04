@@ -6,6 +6,7 @@
 #include "Extension/Skater/skater_teleport.h"
 #include "Engine/Core/Log/logging.h"
 #include "Engine/Game/Build/20260929/local_placements.h"
+#include "Engine/Game/Multiplayer/session_tools.h"
 
 namespace dingosdk {
 using namespace profile_runtime;
@@ -66,7 +67,7 @@ SkaterTeleportSubmission submit_owned_skater_teleport(std::uintptr_t client,cons
     try {
         std::lock_guard lock(local_runtime().native_mutex);
         auto& r=placements_runtime();
-        if (!local_runtime().active || local_runtime().base!=owner.base ||
+        if (!session_noclip_allowed() || !local_runtime().active || local_runtime().base!=owner.base ||
             cosmetic_runtime().update_thread!=GetCurrentThreadId() || !r.teleport || !r.context ||
             !r.transition_ctor || !r.transition_destroy || !valid_skater_teleport_transform(transform)) return {};
         LocalBailOwner current;

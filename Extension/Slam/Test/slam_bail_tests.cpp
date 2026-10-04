@@ -2,6 +2,7 @@
 // No game executable or copyrighted assets are needed by this fixture.
 #include "Extension/Skater/no_bail.cpp"
 #include "Extension/Slam/slam_controls.h"
+#include "Engine/Game/Multiplayer/session_tools.h"
 #include <iostream>
 #include <stdexcept>
 
@@ -93,6 +94,20 @@ int main() {
     using namespace dingosdk::slam;
     using fixture::check;
     fixture::Scene s;
+    set_multiplayer_session_active(true);
+    LocalBailOwner multiplayer_owner;
+    check(resolve_local_bail_owner(s.client,s.entity,multiplayer_owner) && queue_manual_bail(s.client,s.entity),
+        "Multiplayer can resolve and bail its verified local skater");
+    cancel_manual_bail();
+    fixture::put<std::uint8_t>(s.player+0x44,1);
+    check(!resolve_local_bail_owner(s.client,s.entity,multiplayer_owner) && !queue_manual_bail(s.client,s.entity),
+        "A remote multiplayer player cannot authorize Slam telemetry or manual bail");
+    fixture::put<std::uint8_t>(s.player+0x44,0);
+    fixture::put<std::uint8_t>(s.player+0x45,0);
+    check(!resolve_local_bail_owner(s.client,s.entity,multiplayer_owner) && !queue_manual_bail(s.client,s.entity),
+        "A player without the local flag cannot authorize multiplayer Slam");
+    fixture::put<std::uint8_t>(s.player+0x45,1);
+    set_multiplayer_session_active(false);
     s.flags()=0x40000000;
     check(queue_manual_bail(s.client,s.entity),"A verified owned skater can queue a deliberate bail");
     check(!queue_manual_bail(s.client,s.entity),"A pending request cannot be duplicated by held input");
@@ -103,7 +118,7 @@ int main() {
     publish_animation(s.core);
     check(fixture::animation_request,"Physics keeps the request visible until animation actually enters ragdoll");
     const auto counts=manual_bail_status();
-    check(counts.queued==1 && counts.selected==1 && counts.published==1,"Native selection and publication counters confirm one consumed request");
+    check(counts.queued==2 && counts.selected==1 && counts.published==1,"Native selection and publication counters confirm one consumed request after a canceled multiplayer request");
     cancel_manual_bail(); publish_animation(s.core);
     check(!fixture::animation_request,"Canceling delivery prevents a later publication from replaying the request");
     s.flags()=0x8000;

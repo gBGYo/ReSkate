@@ -213,7 +213,7 @@ void skater_page(SkateMenu& menu, const Model& model, const CallbacksV3& callbac
         if (value.bail_key_conflict) warn("Bail key overlaps your menu or console key; choose another key.");
         if (value.bail_controller_conflict) warn("Bail combo overlaps Noclip or a velocity boost and is disabled; choose a different combo.");
         note("F8 is the default. Controller is unbound until recorded. Hold does not repeat; release after menus or recovery before pressing again.");
-        note("Use while riding, walking, running or airborne. No Bail, Noclip, Park Editor, First person and online play block manual bails.");
+        note("Use while riding, walking, running or airborne. No Bail, Noclip, Park Editor and First person block manual bails.");
         if (!value.bail_controls_save_status.empty()) note(value.bail_controls_save_status.c_str());
         end_card();
         begin_card(menu,"slam-xray","X-RAY");
@@ -221,6 +221,7 @@ void skater_page(SkateMenu& menu, const Model& model, const CallbacksV3& callbac
         bool changed=false;
         ImGui::BeginDisabled(!value.visual_options_ready);
         if (toggle_row(menu,"X-ray in normal play","Keep X-ray active without attempts or the Slam score HUD.",visuals.normal_play,value.visual_options_ready)) changed=true;
+        if (toggle_row(menu,"X-ray in replay","Show bones in the replay editor, with injuries from this session's recording.",visuals.replay,value.visual_options_ready)) changed=true;
         const auto visibility_label=[&](dingosdk::slam::XrayVisibility mode) {
             return visuals.normal_play && mode==dingosdk::slam::XrayVisibility::attempt ? "Always" : dingosdk::slam::xray_visibility_name(mode);
         };
@@ -301,6 +302,7 @@ void skater_page(SkateMenu& menu, const Model& model, const CallbacksV3& callbac
         changed|=ImGui::SliderFloat("##slam-camera-strength",&visuals.impact_camera_strength,0.f,1.f,"%.2f",ImGuiSliderFlags_AlwaysClamp);
         ImGui::EndDisabled();
         if (toggle_row(menu,"Impact slow motion","Briefly slow severe hits and new fractures, then restore your game speed.",visuals.slow_motion,value.visual_options_ready)) changed=true;
+        note("In multiplayer, slow motion slows your client simulation. Other players keep their own game speed.");
         ImGui::BeginDisabled(!visuals.slow_motion);
         field(menu,"Game speed on impact"); ImGui::SetNextItemWidth(-FLT_MIN);
         int impact_speed=static_cast<int>(std::lround(visuals.slow_motion_scale*100));

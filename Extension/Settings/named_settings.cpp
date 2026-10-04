@@ -75,7 +75,7 @@ struct Runtime {
     // Players' overrides of settings locked in multiplayer, put back when a session starts.
     std::set<std::size_t> player_locked;
     View view; // scratch for observe(), reused so its strings keep their buffers
-    struct TimePulse { std::size_t index{}; TransientFloatLease lease; };
+    struct TimePulse { std::size_t index{}; TransientFloatLease lease; bool multiplayer{}; };
     std::optional<TimePulse> time_pulse;
 };
 Runtime &runtime() {
@@ -689,7 +689,9 @@ void refresh_named_settings(bool wanted) {
         r.thread = GetCurrentThreadId();
     if (r.thread != GetCurrentThreadId())
         return;
-    if (r.time_pulse && multiplayer_settings_locked()) (void)release_time_pulse();
+    // Slam may own a temporary pulse in multiplayer. Restore it on a session
+    // transition, rather than unwinding it on every settings sweep.
+    if (r.time_pulse && r.time_pulse->multiplayer!=multiplayer_session_active()) (void)release_time_pulse();
     if (r.ready && !r.player_locked.empty() && multiplayer_settings_locked())
         put_back_locked(r);
     if (!r.ready) {
@@ -765,10 +767,11 @@ std::string restore_named_settings() {
 }
 bool begin_impact_time_scale(float factor) {
     auto& r=runtime();
-    if (!r.ready || r.thread!=GetCurrentThreadId() || multiplayer_settings_locked() || r.time_pulse) return false;
+    if (!r.ready || r.thread!=GetCurrentThreadId() || r.time_pulse) return false;
     for (std::size_t index=0;index<r.models.size();++index) {
         if (!console::equal(r.models[index].name,"SimulationTime.TimeScale")) continue;
         r.time_pulse.emplace(); r.time_pulse->index=index;
+        r.time_pulse->multiplayer=multiplayer_session_active();
         const bool accepted=r.time_pulse->lease.begin(factor,[&] {return read_time_pulse(index);},
             [&](const FloatSettingSample& expected,float value) {return write_time_pulse(index,expected,value);});
         if (!r.time_pulse->lease.active()) r.time_pulse.reset();
@@ -779,7 +782,7 @@ bool begin_impact_time_scale(float factor) {
 bool update_impact_time_scale(float factor) {
     auto& r=runtime();
     if (r.thread!=GetCurrentThreadId() || !r.time_pulse) return false;
-    if (multiplayer_settings_locked()) {(void)release_time_pulse(); return false;}
+    if (r.time_pulse->multiplayer!=multiplayer_session_active()) {(void)release_time_pulse(); return false;}
     const auto index=r.time_pulse->index;
     const bool accepted=r.time_pulse->lease.update(factor,[&] {return read_time_pulse(index);},
         [&](const FloatSettingSample& expected,float value) {return write_time_pulse(index,expected,value);});

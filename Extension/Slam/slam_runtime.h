@@ -15,8 +15,13 @@ struct Joint { Vec3 position{}; Region region = Region::torso; int parent = -1; 
 struct Snapshot {
     Result result;
     Result normal_xray_result;
+    Result replay_result;
+    VisualEvents replay_events;
+    std::array<std::uint64_t,injury_bone_count> replay_fracture_seeds{};
+    std::uint64_t replay_time_ms{};
+    bool replay_active{},replay_available{},replay_injuries_known{};
     std::array<Joint, 24> joints{};
-    std::string availability = "Waiting for an offline local skater.";
+    std::string availability = "Waiting for a local skater.";
     std::string mesh_status = "Dem Bones mesh has not been loaded.";
     std::shared_ptr<const SkeletonMesh> mesh;
     std::shared_ptr<const MeshPose> mesh_pose;
@@ -63,7 +68,7 @@ PassOutFrame pass_out_frame() noexcept;
 // Game thread publishes a short-lived, verified local-owner watch. Shared bail
 // hooks observe without changing the native selection, contacts or ragdoll.
 void tick(std::uintptr_t base, std::uintptr_t client, std::uintptr_t entity,
-    bool ready, bool offline, bool no_bail, bool noclip, bool editor, bool first_person,
+    bool ready, bool no_bail, bool noclip, bool editor, bool first_person,
     std::string_view map) noexcept;
 // Restore temporary game speed before native loading tears down the scene.
 void before_level_transition(unsigned next) noexcept;

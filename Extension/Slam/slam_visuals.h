@@ -13,6 +13,7 @@ struct VisualOptions {
     float opacity = .86f, flash_strength = .35f, impact_duration_s = 1.5f;
     bool reduced_effects{}, only_impacted{}, only_fractured{}, normal_play{};
     bool fracture_marks = true, impact_sound = true;
+    bool replay = true;
     float sound_volume = .45f;
     bool fracture_sound = true;
     float fracture_volume = .65f;

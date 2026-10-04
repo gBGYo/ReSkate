@@ -990,7 +990,7 @@ void tick(std::uintptr_t client, std::uintptr_t update) {
         {
             DINGO_PROFILE_ZONE("tick/Slam Challenge");
             dingosdk::slam::tick(r.base, client, r.debug_model.skater_identity,
-                multiplayer_ready && game_type == 1, !dingosdk::multiplayer_session_active(),
+                multiplayer_ready && game_type == 1,
                 r.debug_model.no_bail || r.debug_model.no_bail_active, r.debug_model.noclip,
                 r.debug_model.park_editor, r.debug_model.first_person, r.multiplayer_map);
         }

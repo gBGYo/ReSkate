@@ -86,7 +86,7 @@ void invalidation() {
         case 7: ++f.world; break;
         }
         check(retry.step(f)==RetryStep::failed && !retry.active() && !retry.saved(),
-            "Map reload, owner changes, offline/mode conflicts invalidate the saved start and pending handoff");
+            "Map reload, owner changes and mode conflicts invalidate the saved start and pending handoff");
     }
     for (auto native:{SkaterTeleportState::interrupted,SkaterTeleportState::unavailable}) {
         SavedStartRetry retry; auto f=observation(saved); retry.save(saved); retry.begin(f); retry.submitted({1,99,7},1001);
@@ -125,9 +125,30 @@ void rebuilt_physics() {
         "A second retry uses the rebuilt owner and retains the original transform and challenge");
     check(!retry.retains_start(observation(saved)),"Retired physics cannot be reused after successful owner handoff");
 }
+void multiplayer_permissions() {
+    const auto saved=start(); auto f=observation(saved); SavedStartRetry retry;
+    set_multiplayer_session_active(true);
+    set_session_tools_allowed(false,true,true);
+    check(retry.save(saved) && !retry.available(f) && !retry.begin(f),
+        "Host teleport restrictions block saved-start retry even with a fresh owned skater");
+    set_session_tools_allowed(true,true,true);
+    check(retry.available(f) && retry.begin(f) && retry.step(f)==RetryStep::dispatch,
+        "Host permission allows multiplayer retry for the verified local skater");
+    set_session_tools_allowed(false,true,true);
+    check(retry.step(f)==RetryStep::failed && !retry.active() && retry.saved(),
+        "Revoking teleport permission cancels a queued retry before native dispatch and retains its saved start");
+    set_session_tools_allowed(true,true,true);
+    check(retry.begin(f),"Retry becomes available when host permission returns");
+    retry.submitted({1,99,7},1001);
+    set_session_tools_allowed(false,true,true);
+    check(retry.step(f,SkaterTeleportState::idle)==RetryStep::failed && !retry.active(),
+        "Revoking permission after dispatch cannot start an attempt from native completion");
+    set_session_tools_allowed(true,true,true);
+    set_multiplayer_session_active(false);
+}
 }
 int main() {
-    poses(); arrival(); invalidation(); rebuilt_physics();
+    poses(); arrival(); invalidation(); rebuilt_physics(); multiplayer_permissions();
     if (failures) return 1;
     std::cout<<"Saved-start retry ownership, pose and completion checks passed.\n";
 }
