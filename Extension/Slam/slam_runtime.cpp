@@ -64,6 +64,7 @@ struct State {
     Snapshot published;
     Frame last;
     std::optional<Action> pending;
+    bool audio_preview_requested{};
     std::uint64_t last_at{};
     bool bail_latched{}, manual_bail_origin{}, contracts_checked{}, contracts_ok{};
     bool pose_hooks_checked{}, pose_hooks_ok{};
@@ -846,6 +847,16 @@ bool set_visual_options(const VisualOptions& options) noexcept {
         return true;
     } catch (...) {return false;}
 }
+bool preview_fracture_sound() noexcept {
+    try {
+        auto& s=state(); std::lock_guard lock(s.mutex);
+        if (!s.published.visual_options_ready || !s.published.visuals.fracture_sound ||
+            s.published.visuals.fracture_volume<=0) return false;
+        s.audio_preview_requested=true;
+        s.published.impact_audio_status="Sound preview queued...";
+        return true;
+    } catch (...) {return false;}
+}
 bool set_challenge_config(const Config& config) noexcept {
     if (!valid_config(config)) return false;
     try {
@@ -1255,6 +1266,8 @@ void tick(std::uintptr_t base, std::uintptr_t client, std::uintptr_t entity, boo
                 attempt ? s.published.visual_events : s.published.normal_xray_events,GetTickCount64());
         }
         const auto effects_options=s.published.visuals;
+        const bool audio_preview_requested=s.audio_preview_requested;
+        s.audio_preview_requested=false;
         const auto effects_events=effects_options.normal_play ? s.normal_xray.events() : s.published.visual_events;
         const bool effects_allowed=!visual_issue && !s.effects_suspended.load(std::memory_order_acquire) &&
             !s.retry.active() &&
@@ -1278,7 +1291,7 @@ void tick(std::uintptr_t base, std::uintptr_t client, std::uintptr_t entity, boo
             !no_bail && !noclip && !editor && !first_person && !s.effects_suspended.load())
             retry_submission=submit_owned_skater_teleport(client,retry_dispatch->owner,retry_dispatch->transform);
         const auto pulse=update_time_effect(effects_options,effects_events,camera_allowed);
-        const auto audio_status=update_impact_audio(effects_options,effects_events,feedback_allowed,effects_allowed);
+        const auto audio_status=update_impact_audio(effects_options,effects_events,feedback_allowed,effects_allowed,audio_preview_requested);
         lock.lock();
         if (!pulse.active || !camera_allowed || !effects_options.player_zoom || effects_options.player_zoom_strength<=0)
             s.player_zoom={};

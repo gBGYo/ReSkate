@@ -5,6 +5,8 @@
 #include <limits>
 #include <algorithm>
 #include <cstring>
+#include <fstream>
+#include <iterator>
 
 namespace {
 using namespace dingosdk::slam;
@@ -400,6 +402,77 @@ void custom_audio() {
     wav.insert(wav.begin()+12,junk.begin(),junk.end()); put(4,54,4);
     check(decode_impact_wav(wav)==samples,"Optional odd-sized RIFF chunks are skipped with their padding");
 }
+std::vector<std::byte> test_wav(unsigned rate,const std::vector<std::int16_t>& pcm) {
+    std::vector<std::byte> wav(44+pcm.size()*2);
+    const auto put=[&](std::size_t at,unsigned value,unsigned count) {
+        for (unsigned i=0;i<count;++i) wav[at+i]=static_cast<std::byte>((value>>(i*8))&255);
+    };
+    std::memcpy(wav.data(),"RIFF",4); put(4,static_cast<unsigned>(wav.size()-8),4);
+    std::memcpy(wav.data()+8,"WAVEfmt ",8); put(16,16,4);
+    put(20,1,2); put(22,1,2); put(24,rate,4); put(28,rate*2,4); put(32,2,2); put(34,16,2);
+    std::memcpy(wav.data()+36,"data",4); put(40,static_cast<unsigned>(pcm.size()*2),4);
+    std::memcpy(wav.data()+44,pcm.data(),pcm.size()*2);
+    return wav;
+}
+void custom_audio_sample_rates() {
+    constexpr double pi=3.14159265358979323846;
+    for (const unsigned rate : {8000u,11025u,22050u,44100u,48000u,96000u,192000u}) {
+        std::vector<std::int16_t> tone(rate/10);
+        for (std::size_t i=0;i<tone.size();++i)
+            tone[i]=static_cast<std::int16_t>(std::lround(16000*std::sin(2*pi*1000*static_cast<double>(i)/rate)));
+        std::string_view error="Previous failure";
+        const auto decoded=decode_impact_wav(test_wav(rate,tone),&error);
+        check(decoded && decoded->size()==(tone.size()*48000ull+rate-1)/rate && error.empty(),
+            "Lower and higher sample rates preserve duration to within one 48 kHz sample");
+        if (decoded && decoded->size()>192) {
+            double squared_error{};
+            for (std::size_t i=96;i<decoded->size()-96;++i) {
+                const double ideal=16000*std::sin(2*pi*1000*static_cast<double>(i)/48000);
+                squared_error+=std::pow((*decoded)[i]-ideal,2);
+            }
+            check(std::sqrt(squared_error/static_cast<double>(decoded->size()-192))<35,
+                "Resampling preserves a 1 kHz tone's pitch, timing and amplitude");
+        }
+        if (rate==48000) check(decoded && *decoded==tone,"48 kHz clips remain sample-identical");
+        const auto constant=decode_impact_wav(test_wav(rate,std::vector<std::int16_t>(3,12345)));
+        check(constant && std::all_of(constant->begin(),constant->end(),[](auto v) {return v==12345;}),
+            "Very short clips retain constant gain without invalid boundary reads");
+        const auto full=decode_impact_wav(test_wav(rate,std::vector<std::int16_t>(rate*2,-32768)));
+        check(full && full->size()==96000 && full->front()==-32768 && full->back()==-32768,
+            "The two-second limit uses input time and resampling stays within PCM16 bounds");
+        check(!decode_impact_wav(test_wav(rate,std::vector<std::int16_t>(rate*2+1)),&error) &&
+            error=="Sound is longer than two seconds.","One input sample over two seconds is rejected with a useful error");
+    }
+    // Frequencies above the output Nyquist limit must be filtered rather than
+    // folded into audible tones when a high-rate recording is downsampled.
+    for (const unsigned rate : {96000u,192000u}) {
+        std::vector<std::int16_t> tone(rate/10);
+        for (std::size_t i=0;i<tone.size();++i)
+            tone[i]=static_cast<std::int16_t>(std::lround(16000*std::sin(2*pi*32000*static_cast<double>(i)/rate)));
+        const auto decoded=decode_impact_wav(test_wav(rate,tone));
+        double energy{};
+        if (decoded) for (std::size_t i=96;i<decoded->size()-96;++i) energy+=static_cast<double>((*decoded)[i])*(*decoded)[i];
+        check(decoded && std::sqrt(energy/static_cast<double>(decoded->size()-192))<10,
+            "Downsampling suppresses out-of-band audio instead of introducing alias tones");
+    }
+    std::string_view error;
+    for (const unsigned rate : {0u,7999u,192001u})
+        check(!decode_impact_wav(test_wav(rate,{123}),&error) && error=="Supported sample rates are 8-192 kHz.",
+            "Rates outside the supported range fail with a specific error");
+    auto bad=test_wav(44100,{123}); bad[28]=std::byte{};
+    check(!decode_impact_wav(bad,&error) && error=="Invalid PCM byte rate or block alignment.",
+        "An inconsistent PCM header cannot reach conversion");
+    bad=test_wav(11025,{123}); bad[22]=std::byte{2};
+    check(!decode_impact_wav(bad,&error) && error=="Use a mono WAV file.","Stereo WAVs report the mono requirement");
+    bad=test_wav(11025,{123}); bad[20]=std::byte{3};
+    check(!decode_impact_wav(bad,&error) && error=="Use a 16-bit PCM WAV file.","Other encodings report the PCM16 requirement");
+    check(!decode_impact_wav(std::vector<std::byte>(max_impact_wav_bytes+1),&error) &&
+        error=="WAV file exceeds the 1 MiB limit.","File allocation remains bounded even for high sample rates");
+    auto data_first=test_wav(11025,{123,456});
+    std::rotate(data_first.begin()+12,data_first.begin()+36,data_first.end());
+    check(decode_impact_wav(data_first)==decode_impact_wav(test_wav(11025,{123,456})),
+        "WAV chunk order does not affect format validation or resampling");
+}
 void player_zoom_and_pass_out() {
     const ZoomImpulse zoom{1000,1,.3f,.5f};
     const auto start=sample_player_zoom(zoom,1000),hold=sample_player_zoom(zoom,1250),end=sample_player_zoom(zoom,1900);
@@ -575,8 +648,20 @@ void impact_camera_timing() {
     options.reduced_effects=false; event.latest_impact_ms=2300; event.latest_fracture=false; event.latest_severity=100;
     check(!pulse.step(options,event,2300,true).started_ms,"Minor contacts cannot shake the normal skating camera");
 }
-int main() {
+int main(int argc,char** argv) {
     saved_options(); visibility_and_flashes(); normal_play_falls(); normal_play_recovery_fade(); impact_feedback(); configurable_bone_damage(); delayed_bail_feedback(); time_scale_ownership(); slow_motion_envelope(); impact_camera_timing(); custom_audio(); player_zoom_and_pass_out(); smooth_player_follow();
+    custom_audio_sample_rates();
+    // Optional local clips let developers exercise the actual decoder without
+    // adding user recordings or an audio device dependency to the test suite.
+    for (int i=1;i<argc;++i) {
+        std::ifstream file(argv[i],std::ios::binary);
+        const std::vector<char> input((std::istreambuf_iterator<char>(file)),{});
+        std::string_view error;
+        const auto decoded=decode_impact_wav(std::as_bytes(std::span(input)),&error);
+        check(decoded.has_value(),"The supplied local WAV can be loaded and converted");
+        if (decoded) std::cout<<argv[i]<<": "<<decoded->size()<<" samples at 48 kHz.\n";
+        else std::cerr<<argv[i]<<": "<<error<<'\n';
+    }
     if (failures) return 1;
     std::cout<<"Slam visual timing, accessibility and saved-options checks passed.\n";
 }

@@ -55,8 +55,11 @@ struct VisualAppearance {
 };
 // Original, bounded 48 kHz mono PCM; no extracted or downloaded audio.
 std::vector<std::int16_t> make_impact_sound(bool fracture,unsigned variant=0);
-// Optional replacement clip: RIFF PCM16, 48 kHz mono, at most two seconds.
-std::optional<std::vector<std::int16_t>> decode_impact_wav(std::span<const std::byte> bytes) noexcept;
+inline constexpr std::size_t max_impact_wav_bytes = 1024*1024;
+// RIFF PCM16 mono, 8-192 kHz, at most two seconds; returns 48 kHz PCM.
+// The optional diagnostic refers to static storage, including on failure.
+std::optional<std::vector<std::int16_t>> decode_impact_wav(std::span<const std::byte> bytes,
+    std::string_view* error=nullptr) noexcept;
 struct TimePulseFrame {float factor = 1; bool active{},started{};};
 class SlowMotionPulse {
 public:

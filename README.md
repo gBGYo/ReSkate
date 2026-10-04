@@ -210,10 +210,13 @@ leaving a small margin at either end.
 Under **Skater → SLAM → SLAM EFFECTS**, **Impact sound** adds a thud for confirmed contacts.
 **Bone cracking sound** adds separate dry splinter transients with four texture variants when a bone
 first fractures. Both have independent switches and volume sliders. An optional **Custom bone crack
-WAV** path replaces the generated crack with your own recording: PCM16, mono, 48 kHz, at most two
-seconds. Enter the file path and press Enter; an empty path uses built-in cracks. Missing or unsupported
-files fall back to built-in cracks and show a status message. Audio prepares in the background while
-skating, and playback stops on recovery, menus or focus loss.
+WAV** path replaces the generated crack with your own recording: PCM16, mono, 8-192 kHz, at most two
+seconds. Clips are converted to 48 kHz in the background, preserving duration and pitch. Enter the file
+path and press Enter; an empty path uses built-in cracks. **Preview bone crack** tests the applied sound
+at the configured bone-cracking volume while the menu is open. Missing or unsupported files fall back
+to built-in cracks during gameplay and show the specific loading error; a failed custom file is not
+played by the preview button. Gameplay audio stops on recovery, menus or focus loss; previews stop
+on focus loss.
 **Impact slow motion** slows severe hits and newly fractured bones, holds the configured speed,
 then smoothly returns to the previous game speed. Speed, duration (0.15–3 seconds), hold fraction
 and severity threshold are adjustable; further contacts cannot extend a running pulse. The new default

@@ -38,6 +38,11 @@ if(DINGOSDK_BUILD_SLAM_TESTS)
     target_link_libraries(dingosdk_slam_replay_tests PRIVATE dingosdk_json)
     add_test(NAME slam_replay COMMAND dingosdk_slam_replay_tests)
     if(WIN32)
+        add_executable(dingosdk_slam_audio_tests Extension/Slam/Test/slam_audio_tests.cpp
+            Extension/Slam/slam_visuals.cpp Extension/Slam/slam_model.cpp)
+        target_link_libraries(dingosdk_slam_audio_tests PRIVATE dingosdk_json xaudio2 ole32 user32)
+        add_test(NAME slam_audio_preview COMMAND dingosdk_slam_audio_tests)
+        set_tests_properties(slam_audio_preview PROPERTIES SKIP_RETURN_CODE 77)
         add_executable(dingosdk_slam_capture_tests Extension/Slam/Test/slam_capture_tests.cpp
             Extension/UI/Overlay/slam_mesh_renderer.cpp Extension/Slam/slam_mesh.cpp
             Extension/Slam/slam_visuals.cpp Extension/Slam/slam_model.cpp)

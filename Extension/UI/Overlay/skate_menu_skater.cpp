@@ -218,7 +218,7 @@ void skater_page(SkateMenu& menu, const Model& model, const CallbacksV3& callbac
         end_card();
         begin_card(menu,"slam-xray","X-RAY");
         auto visuals=value.visuals;
-        bool changed=false;
+        bool changed=false,preview_sound=false;
         ImGui::BeginDisabled(!value.visual_options_ready);
         if (toggle_row(menu,"X-ray in normal play","Keep X-ray active without attempts or the Slam score HUD.",visuals.normal_play,value.visual_options_ready)) changed=true;
         if (toggle_row(menu,"X-ray in replay","Show bones in the replay editor, with injuries from this session's recording.",visuals.replay,value.visual_options_ready)) changed=true;
@@ -290,8 +290,12 @@ void skater_page(SkateMenu& menu, const Model& model, const CallbacksV3& callbac
         if (ImGui::InputText("##slam-crack-path",crack_path.data(),crack_path.size(),ImGuiInputTextFlags_EnterReturnsTrue)) {
             visuals.fracture_sound_path=crack_path.data(); changed=true;
         }
-        note("Optional file path; press Enter to apply. PCM16 mono, 48 kHz, at most 2 seconds. Empty uses built-in cracks.");
+        note("Optional file path; press Enter to apply. PCM16 mono WAV, 8-192 kHz, at most 2 seconds. Empty uses built-in cracks.");
+        ImGui::BeginDisabled(visuals.fracture_volume<=0);
+        preview_sound=ImGui::Button("Preview bone crack",ImVec2(-FLT_MIN,0));
         ImGui::EndDisabled();
+        ImGui::EndDisabled();
+        if ((visuals.impact_sound || visuals.fracture_sound) && !value.impact_audio_status.empty()) note(value.impact_audio_status.c_str());
         ImGui::BeginDisabled(visuals.reduced_effects);
         field(menu,"Severe impact threshold"); ImGui::SetNextItemWidth(-FLT_MIN);
         changed|=ImGui::SliderFloat("##slam-effect-severity",&visuals.effect_severity,25.f,2000.f,"%.0f",ImGuiSliderFlags_AlwaysClamp);
@@ -341,11 +345,11 @@ void skater_page(SkateMenu& menu, const Model& model, const CallbacksV3& callbac
         if (ImGui::Button("Reset visual and sound settings",ImVec2(-FLT_MIN,0))) {visuals={}; changed=true;}
         ImGui::EndDisabled();
         if (changed) (void)dingosdk::slam::set_visual_options(visuals);
+        if (preview_sound) (void)dingosdk::slam::preview_fracture_sound();
         if (visuals.normal_play) note("Normal-play X-ray follows every fall and clears injury highlights after recovery. No attempt or reset is needed.");
         if (value.first_person) note("The skeleton is hidden while First person is enabled.");
         note("Ivory bones with blue uninjured patches, orange bruises and red fractures. X-ray settings are saved automatically.");
         if (!value.visual_save_status.empty()) note(value.visual_save_status.c_str());
-        if ((visuals.impact_sound || visuals.fracture_sound) && !value.impact_audio_status.empty()) note(value.impact_audio_status.c_str());
         if (visuals.reduced_effects) note("Reduced effects suppresses flashes, zoom, shake, automatic slow motion and pass-out fading.");
         else if (visuals.slow_motion && !value.slow_motion_status.empty()) note(value.slow_motion_status.c_str());
         if ((visuals.impact_camera || (visuals.slow_motion && visuals.player_zoom)) && !visuals.reduced_effects && !value.impact_camera_available) note("Impact camera is unavailable in the current view.");

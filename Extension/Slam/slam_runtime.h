@@ -56,6 +56,8 @@ struct Snapshot {
 // Presentation/console threads only queue controls and copy immutable snapshots.
 bool request(Action action) noexcept;
 bool set_visual_options(const VisualOptions& options) noexcept;
+// Queues one preview using the current applied sound settings.
+bool preview_fracture_sound() noexcept;
 // Applies to the next attempt. The running challenge retains its own rules.
 bool set_challenge_config(const Config& config) noexcept;
 bool set_bail_controls(const BailControls& controls) noexcept;

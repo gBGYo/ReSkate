@@ -235,9 +235,15 @@ std::vector<std::int16_t> make_impact_sound(bool fracture,unsigned variant) {
     samples.front()=samples.back()=0;
     return samples;
 }
-std::optional<std::vector<std::int16_t>> decode_impact_wav(std::span<const std::byte> bytes) noexcept {
+std::optional<std::vector<std::int16_t>> decode_impact_wav(std::span<const std::byte> bytes,std::string_view* error) noexcept {
+    if (error) *error={};
+    const auto fail=[&](std::string_view reason)->std::optional<std::vector<std::int16_t>> {
+        if (error) *error=reason;
+        return {};
+    };
     try {
-        if (bytes.size()<44 || bytes.size()>256*1024) return {};
+        if (bytes.size()<44) return fail("WAV file is truncated.");
+        if (bytes.size()>max_impact_wav_bytes) return fail("WAV file exceeds the 1 MiB limit.");
         const auto tag=[&](std::size_t at,const char* name) {return std::memcmp(bytes.data()+at,name,4)==0;};
         const auto word=[&](std::size_t at) {
             return std::to_integer<unsigned>(bytes[at])|(std::to_integer<unsigned>(bytes[at+1])<<8);
@@ -245,30 +251,78 @@ std::optional<std::vector<std::int16_t>> decode_impact_wav(std::span<const std::
         const auto dword=[&](std::size_t at) {
             return static_cast<std::uint32_t>(word(at))|(static_cast<std::uint32_t>(word(at+2))<<16);
         };
-        if (!tag(0,"RIFF") || !tag(8,"WAVE") || dword(4)!=bytes.size()-8) return {};
+        if (!tag(0,"RIFF") || !tag(8,"WAVE") || dword(4)!=bytes.size()-8)
+            return fail("Invalid RIFF WAV header or file size.");
         bool format{};
+        unsigned rate{};
         std::span<const std::byte> data;
         for (std::size_t at=12;at<bytes.size();) {
-            if (bytes.size()-at<8) return {};
+            if (bytes.size()-at<8) return fail("WAV chunk header is truncated.");
             const auto size=static_cast<std::size_t>(dword(at+4));
-            if (size>bytes.size()-at-8) return {};
+            if (size>bytes.size()-at-8) return fail("WAV chunk data is truncated.");
             if (tag(at,"fmt ")) {
-                if (format || size<16 || word(at+8)!=1 || word(at+10)!=1 || dword(at+12)!=48000 ||
-                    dword(at+16)!=96000 || word(at+20)!=2 || word(at+22)!=16) return {};
+                if (format || size<16) return fail("Invalid or duplicate WAV format chunk.");
+                if (word(at+8)!=1 || word(at+22)!=16) return fail("Use a 16-bit PCM WAV file.");
+                if (word(at+10)!=1) return fail("Use a mono WAV file.");
+                rate=dword(at+12);
+                if (rate<8000 || rate>192000) return fail("Supported sample rates are 8-192 kHz.");
+                if (dword(at+16)!=rate*2 || word(at+20)!=2) return fail("Invalid PCM byte rate or block alignment.");
                 format=true;
             } else if (tag(at,"data")) {
-                if (!data.empty() || !size || size%2 || size>192000) return {};
+                if (!data.empty() || !size || size%2) return fail("Invalid or duplicate WAV sample data.");
                 data=bytes.subspan(at+8,size);
             }
             const auto padded=size+(size&1);
-            if (padded>bytes.size()-at-8) return {};
+            if (padded>bytes.size()-at-8) return fail("WAV chunk padding is truncated.");
             at+=8+padded;
         }
-        if (!format || data.empty()) return {};
+        if (!format || data.empty()) return fail("WAV format or sample data is missing.");
+        if (data.size()/2>rate*2) return fail("Sound is longer than two seconds.");
         std::vector<std::int16_t> samples(data.size()/2);
         std::memcpy(samples.data(),data.data(),data.size());
-        return samples;
-    } catch (...) {return {};}
+        if (rate==48000) return samples;
+
+        // A windowed-sinc low-pass filter prevents aliasing when reducing the
+        // rate and suppresses imaging when increasing it. Precompute phases
+        // once per load; the physics and playback paths never resample.
+        constexpr double pi=3.14159265358979323846;
+        constexpr unsigned phases=1024;
+        const double cutoff=.94*std::min(1.,48000./rate);
+        const int radius=static_cast<int>(std::ceil(16/cutoff));
+        const auto taps=static_cast<std::size_t>(radius*2+1);
+        std::vector<double> filters(phases*taps);
+        for (unsigned phase=0;phase<phases;++phase) {
+            const double fraction=static_cast<double>(phase)/phases;
+            double sum{};
+            for (int tap=-radius;tap<=radius;++tap) {
+                const double distance=tap-fraction;
+                const double x=distance*cutoff;
+                const double sinc=std::abs(x)<1e-12 ? 1. : std::sin(pi*x)/(pi*x);
+                const double window=std::abs(distance)>=radius ? 0. :
+                    .42+.5*std::cos(pi*distance/radius)+.08*std::cos(2*pi*distance/radius);
+                const double weight=cutoff*sinc*window;
+                filters[phase*taps+static_cast<std::size_t>(tap+radius)]=weight;
+                sum+=weight;
+            }
+            for (std::size_t tap=0;tap<taps;++tap) filters[phase*taps+tap]/=sum;
+        }
+        const auto count=(samples.size()*48000ull+rate-1)/rate;
+        std::vector<std::int16_t> converted(static_cast<std::size_t>(count));
+        for (std::size_t i=0;i<converted.size();++i) {
+            const auto position=i*static_cast<std::uint64_t>(rate);
+            const auto center=static_cast<std::int64_t>(position/48000);
+            const auto phase=static_cast<std::size_t>((position%48000)*phases/48000);
+            double value{};
+            for (int tap=-radius;tap<=radius;++tap) {
+                // Extend the boundary samples to keep DC gain steady even
+                // for very short clips; rounded output lasts <= one extra sample.
+                const auto index=std::clamp(center+tap,std::int64_t{0},static_cast<std::int64_t>(samples.size()-1));
+                value+=samples[static_cast<std::size_t>(index)]*filters[phase*taps+static_cast<std::size_t>(tap+radius)];
+            }
+            converted[i]=static_cast<std::int16_t>(std::clamp(std::lround(value),-32768l,32767l));
+        }
+        return converted;
+    } catch (...) {return fail("Could not decode or convert the WAV file.");}
 }
 TimePulseFrame SlowMotionPulse::step(const VisualOptions& options,const VisualEvents& events,std::uint64_t now,bool allowed) noexcept {
     const bool new_hit=events.latest_impact_ms && events.latest_impact_ms!=observed_ms_;
