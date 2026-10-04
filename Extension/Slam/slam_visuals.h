@@ -67,12 +67,17 @@ private:
 class FreeplayXray {
 public:
     void step(const Frame& frame, std::uint64_t now);
-    void reset() { challenge_.reset(); events_.reset(); }
+    void reset() { challenge_.reset(); events_.reset(); impact_result_={}; impact_events_.reset(); }
     const Result& result() const noexcept { return challenge_.result(); }
     const VisualEvents& events() const noexcept { return events_; }
+    // Impact presentation outlives recovery/rearming; feedback uses live events.
+    const Result& impact_result() const noexcept { return impact_result_; }
+    const VisualEvents& impact_events() const noexcept { return impact_events_; }
 private:
     Challenge challenge_;
     VisualEvents events_;
+    Result impact_result_;
+    VisualEvents impact_events_;
 };
 // Wall-clock envelopes keep fading after the result stops physics scoring.
 // No native camera, frame rate, or GPU state enters this presentation model.

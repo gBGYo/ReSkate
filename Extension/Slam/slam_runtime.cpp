@@ -612,8 +612,9 @@ void publish_result(State& s) {
     if (s.published.xray_context_valid) s.published.visual_events.observe(s.published.result,GetTickCount64());
     else s.published.visual_events.reset();
     s.visible.store(s.published.visible, std::memory_order_release);
-    s.published.normal_xray_result=s.normal_xray.result();
-    s.published.normal_xray_events=s.normal_xray.events();
+    const bool impact_visibility=s.published.visuals.visibility==XrayVisibility::impact;
+    s.published.normal_xray_result=impact_visibility ? s.normal_xray.impact_result() : s.normal_xray.result();
+    s.published.normal_xray_events=impact_visibility ? s.normal_xray.impact_events() : s.normal_xray.events();
     s.draw_active.store(s.published.visible ||
         (s.published.visuals.normal_play && s.published.normal_xray_available),std::memory_order_release);
 }
@@ -1053,7 +1054,7 @@ void tick(std::uintptr_t base, std::uintptr_t client, std::uintptr_t entity, boo
         if (GetTickCount64()-s.last_at>500) s.normal_xray.reset();
         publish_result(s);
         const auto effects_options=s.published.visuals;
-        const auto effects_events=effects_options.normal_play ? s.published.normal_xray_events : s.published.visual_events;
+        const auto effects_events=effects_options.normal_play ? s.normal_xray.events() : s.published.visual_events;
         const bool effects_allowed=!visual_issue && !s.effects_suspended.load(std::memory_order_acquire) &&
             !s.retry.active() &&
             !s.effects_cancel_requested.exchange(false,std::memory_order_acq_rel) && GetTickCount64()-s.last_at<250 &&

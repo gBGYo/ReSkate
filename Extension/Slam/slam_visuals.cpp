@@ -116,6 +116,10 @@ void FreeplayXray::step(const Frame& frame,std::uint64_t now) {
     } else challenge_.step(frame);
     if (challenge_.result().cancelled) reset();
     events_.observe(challenge_.result(),now);
+    if (events_.latest_impact_ms) {
+        impact_result_=challenge_.result();
+        impact_events_=events_;
+    }
 }
 namespace {
 float age(std::uint64_t at,std::uint64_t now) noexcept {

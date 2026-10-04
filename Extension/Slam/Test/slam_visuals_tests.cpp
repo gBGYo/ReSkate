@@ -82,6 +82,55 @@ void normal_play_falls() {
     options.visibility=XrayVisibility::off;
     check(visual_appearance(options,xray.result(),xray.events(),8000,false,true).opacity==0,"Off overrides standalone X-ray");
 }
+void normal_play_recovery_fade() {
+    for (const float duration : {.3f,1.5f,5.f}) {
+        FreeplayXray recovered,bailed;
+        Frame frame; frame.valid=true; frame.entity=11; frame.world=22; frame.dt=.02f;
+        frame.center={0,10,0}; frame.body_count=1;
+        frame.bodies[0].region=Region::head; frame.bodies[0].joint=102;
+        frame.bodies[0].velocity={0,-20,0};
+        recovered.step(frame,1000); bailed.step(frame,1000);
+        frame.bailed=true; frame.grounded=true; frame.bodies[0].contact=true;
+        frame.bodies[0].normal={0,1,0}; frame.bodies[0].velocity={};
+        recovered.step(frame,1020); bailed.step(frame,1020);
+        VisualOptions options; options.visibility=XrayVisibility::impact;
+        options.only_impacted=true; options.impact_duration_s=duration;
+        const auto appearance=[&](const FreeplayXray& xray,std::uint64_t now) {
+            return visual_appearance(options,xray.impact_result(),xray.impact_events(),now,false,true);
+        };
+        const auto hit=appearance(recovered,1020);
+        check(hit.colors[102][3]>0,"Recovery fade starts with a visible injured bone");
+        frame.bailed=false; recovered.step(frame,1040); recovered.step(frame,1060);
+        check(recovered.result().phase==Phase::attempt && !recovered.result().impacts && !recovered.events().latest_impact_ms,
+            "Recovery rearms scoring and clears live feedback while the previous impact can still fade");
+        check(appearance(recovered,1060).colors==appearance(bailed,1060).colors,
+            "Early recovery and rearming preserve the original bone colors and opacity");
+        const auto middle=1020+static_cast<std::uint64_t>(duration*800);
+        const auto fading=appearance(recovered,middle);
+        check(fading.opacity>0 && fading.opacity<hit.opacity && fading.colors==appearance(bailed,middle).colors,
+            "Recovered bones follow the same configured fade as bones while still bailed");
+        const auto end=1020+static_cast<std::uint64_t>(std::ceil(duration*1000));
+        check(appearance(recovered,end).opacity==0 && appearance(bailed,end).opacity==0,
+            "Recovery neither truncates nor restarts the configured impact duration");
+
+        // A second fall can begin before the retained presentation expires.
+        frame.bodies[0].joint=277; frame.bodies[0].region=Region::left_arm;
+        frame.bodies[0].contact=false; frame.bodies[0].velocity={0,-20,0};
+        recovered.step(frame,1080);
+        frame.bailed=true; frame.bodies[0].contact=true; frame.bodies[0].velocity={};
+        recovered.step(frame,1100);
+        const auto next=appearance(recovered,1100);
+        check(recovered.result().impacts==1 && recovered.impact_events().latest_impact_ms==1100 &&
+            next.colors[277][3]>0 && next.colors[102][3]==0,
+            "An overlapping new fall replaces the retained injuries and starts its own fade");
+        frame.entity=12; recovered.step(frame,1120);
+        check(!recovered.impact_events().latest_impact_ms && appearance(recovered,1120).opacity==0,
+            "Changing skaters immediately discards the retained impact presentation");
+        bailed.reset();
+        check(!bailed.impact_events().latest_impact_ms && appearance(bailed,1120).opacity==0,
+            "Disabling X-ray clears the retained impact presentation");
+    }
+}
 void impact_feedback() {
     VisualOptions options;
     Result result; result.phase=Phase::bailed;
@@ -301,7 +350,7 @@ void impact_camera_timing() {
     check(!pulse.step(options,event,2300,true).started_ms,"Minor contacts cannot shake the normal skating camera");
 }
 int main() {
-    saved_options(); visibility_and_flashes(); normal_play_falls(); impact_feedback(); delayed_bail_feedback(); time_scale_ownership(); slow_motion_envelope(); impact_camera_timing();
+    saved_options(); visibility_and_flashes(); normal_play_falls(); normal_play_recovery_fade(); impact_feedback(); delayed_bail_feedback(); time_scale_ownership(); slow_motion_envelope(); impact_camera_timing();
     if (failures) return 1;
     std::cout<<"Slam visual timing, accessibility and saved-options checks passed.\n";
 }
