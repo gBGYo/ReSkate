@@ -4,6 +4,7 @@
 #include <iostream>
 #include <limits>
 #include <algorithm>
+#include <cstring>
 
 namespace {
 using namespace dingosdk::slam;
@@ -20,12 +21,26 @@ void saved_options() {
     options.impact_sound=false; options.fracture_marks=false; options.sound_volume=.2f;
     options.slow_motion=false; options.slow_motion_scale=.5f; options.slow_motion_seconds=.8f;
     options.impact_camera=false; options.impact_camera_strength=.4f;
+    options.fracture_sound=false; options.fracture_volume=.75f; options.fracture_sound_path="sounds/bone crack.wav";
+    options.slow_motion_hold=.7f; options.effect_severity=900; options.player_zoom=false; options.player_zoom_strength=.4f;
+    options.pass_out=false; options.pass_out_hud=false; options.pass_out_strength=1; options.pass_out_seconds=4; options.pass_out_severity=800;
+    options.player_zoom_ease_seconds=.5f; options.player_follow_seconds=.3f; options.pass_out_redness=.65f;
+    options.only_fractured=true;
     check(decode_visual_options(encode_visual_options(options))==std::optional(options),
         "Reduced effects, timing and opacity survive together");
     check(!decode_visual_options("{}") && !decode_visual_options("{\"version\":2}"),"Missing and unsupported settings cannot replace defaults");
     check(decode_visual_options(R"({"version":1,"visibility":0,"opacity":0.86,"flash":0.35,"impactSeconds":1.5,"reduced":false})")==std::optional(defaults),
         "Original X-ray saves gain the new impact options without losing their saved settings");
     const auto encoded=encode_visual_options(options);
+    auto before_fracture_filter=encoded;
+    const auto filter_at=before_fracture_filter.find("\"onlyFractured\":true,");
+    before_fracture_filter.erase(filter_at,std::string_view("\"onlyFractured\":true,").size());
+    auto without_filter=options; without_filter.only_fractured=false;
+    check(decode_visual_options(before_fracture_filter)==std::optional(without_filter),
+        "Existing visual saves keep the fracture-only filter off and preserve other preferences");
+    auto invalid_filter=encoded;
+    invalid_filter.replace(invalid_filter.find("\"onlyFractured\":true"),std::string_view("\"onlyFractured\":true").size(),"\"onlyFractured\":1");
+    check(!decode_visual_options(invalid_filter),"The fracture-only option accepts a saved boolean only");
     auto legacy=encoded; const auto added=legacy.find("\"onlyImpacted\":true,"); legacy.erase(added,20);
     auto old=options; old.only_impacted=false;
     check(decode_visual_options(legacy)==std::optional(old),"Existing X-ray saves restore without the new optional field");
@@ -43,7 +58,32 @@ void saved_options() {
     bool rejected{};
     try {(void)encode_visual_options(options);} catch (...) {rejected=true;}
     check(rejected,"Invalid visual options cannot be saved");
-    check(!decode_visual_options(std::string(513,' ')),"Oversized saved documents fail safely");
+    check(!decode_visual_options(std::string(4097,' ')),"Oversized saved documents fail safely");
+    const auto muted=decode_visual_options(R"({"version":1,"visibility":0,"opacity":0.86,"flash":0.35,"impactSeconds":1.5,"reduced":false,"impactSound":false,"soundVolume":0.2,"slowMotionSeconds":0.45})");
+    check(muted && !muted->impact_sound && !muted->fracture_sound && muted->fracture_volume==.2f && muted->slow_motion_seconds==.45f,
+        "Upgrading preserves previous sound-off, volume and slow-motion duration preferences");
+    for (const auto name : {"fractureVolume","slowMotionHold","effectSeverity","playerZoomStrength","passOutStrength","passOutSeconds","passOutSeverity",
+        "playerZoomEaseSeconds","playerFollowSeconds","passOutRedness"}) {
+        auto bad_number=encoded;
+        const auto at=bad_number.find(std::string("\"")+name+"\":")+std::strlen(name)+3;
+        const auto end=bad_number.find_first_of(",}",at);
+        bad_number.replace(at,end-at,"99999");
+        check(!decode_visual_options(bad_number),"Out-of-range presentation controls cannot be restored");
+    }
+    options=defaults; options.fracture_sound_path=std::string(241,'x');
+    check(!valid_visual_options(options),"Custom sound paths are bounded to the menu's buffer size");
+    auto previous=encoded;
+    for (const auto name : {"playerZoomEaseSeconds","playerFollowSeconds","passOutRedness"}) {
+        const auto at=previous.find(std::string("\"")+name+"\":");
+        const auto end=previous.find_first_of(",}",at);
+        previous.erase(at,end-at+1);
+    }
+    auto upgraded=decode_visual_options(previous);
+    check(upgraded && upgraded->player_zoom_ease_seconds==defaults.player_zoom_ease_seconds &&
+        upgraded->player_follow_seconds==defaults.player_follow_seconds && upgraded->pass_out_redness==defaults.pass_out_redness,
+        "Earlier visual saves receive smooth tracking and a subtle red tint without losing settings");
+    options=defaults; options.pass_out_redness=std::numeric_limits<float>::quiet_NaN();
+    check(!valid_visual_options(options),"A non-finite fade tint cannot reach rendering");
 }
 void normal_play_falls() {
     FreeplayXray xray;
@@ -182,8 +222,61 @@ void impact_feedback() {
         }
         check(early>late_energy*20,"The impact's attack decays instead of sustaining an alarm-like sound");
     }
+    check(make_impact_sound(true,0)!=make_impact_sound(true,1),"New fractures have distinct crack textures");
+    for (unsigned variant=0;variant<4;++variant) {
+        const auto pcm=make_impact_sound(true,variant);
+        check(pcm.front()==0 && pcm.back()==0 && std::all_of(pcm.begin(),pcm.end(),[](auto sample) {
+            return std::abs(static_cast<int>(sample))<=26214;
+        }),"Every fracture variant remains bounded and click-free at its endpoints");
+    }
     options.sound_volume=std::numeric_limits<float>::infinity();
     check(!valid_visual_options(options),"Non-finite sound gain cannot reach playback");
+}
+void configurable_bone_damage() {
+    VisualOptions options; options.reduced_effects=true; options.only_impacted=true;
+    Result result; result.phase=Phase::bailed; result.config.scoring.bruise_threshold=100;
+    VisualEvents events;
+    result.bone_injuries[277].severity=99;
+    const auto light=visual_appearance(options,result,events,1000,false);
+    check(light.colors[277][3]==0 && light.damage[277][1]==0 && !is_bruised(result.bone_injuries[277],result.config.scoring),
+        "Damage below the bruise threshold is not marked or revealed by contact-only X-ray");
+    result.bone_injuries[277].severity=100;
+    const auto bruised=visual_appearance(options,result,events,1000,false);
+    check(bruised.colors[277][3]==options.opacity && bruised.colors[277][1]==.55f &&
+        std::string_view(injury_state_name(result.bone_injuries[277],result.config.scoring))=="bruised",
+        "Reaching the bruise threshold reveals the yellow injury and its result label");
+    result.bone_injuries[277].fractured=true; options.only_fractured=true;
+    const auto broken=visual_appearance(options,result,events,1000,false);
+    check(broken.colors[277][3]==options.opacity && broken.colors[277][1]==.16f,
+        "Fractures take precedence over bruises in fracture-only X-ray");
+
+    FreeplayXray xray;
+    Frame frame; frame.valid=true; frame.entity=11; frame.world=22; frame.dt=.02f;
+    frame.center={0,10,0}; frame.body_count=1;
+    auto& head=frame.bodies[0]; head.region=Region::head; head.joint=103; head.velocity={0,-20,0};
+    ScoreRules rules; rules.bruise_threshold=500; rules.head_fracture=1000; rules.limb_fracture=1500;
+    xray.step(frame,1000);
+    xray.step(frame,1020,rules);
+    check(xray.result().config.scoring==rules,"Changing thresholds before a normal-play fall updates its armed rules");
+    frame.bailed=true; frame.grounded=true; head.contact=true; head.normal={0,1,0}; head.velocity={};
+    xray.step(frame,1040,rules);
+    check(xray.result().bone_injuries[103].severity>0 && !is_bruised(xray.result().bone_injuries[103],rules) &&
+        !xray.result().bone_injuries[103].fractured,"Normal-play impacts use the configured bruise and fracture thresholds");
+    ScoreRules next_rules; next_rules.head_fracture=10; next_rules.limb_fracture=20;
+    xray.step(frame,1060,next_rules);
+    check(xray.result().config.scoring==rules && !xray.result().bone_injuries[103].fractured,
+        "Changing thresholds during a fall cannot relabel it or retroactively trigger a crack");
+    for (unsigned hit=0;hit<2;++hit) {
+        head.contact=false; head.velocity={0,-20,0}; xray.step(frame,1080+hit*40,next_rules);
+        head.contact=true; head.velocity={}; xray.step(frame,1100+hit*40,next_rules);
+        const auto& injury=xray.result().bone_injuries[103];
+        check(hit==0 ? is_bruised(injury,rules) && !injury.fractured : injury.fractured && xray.events().latest_fracture,
+            "Separate confirmed hits accumulate first into a bruise, then into a fracture and its feedback event");
+    }
+    frame.bailed=false; xray.step(frame,1200,next_rules);
+    xray.step(frame,1220,next_rules);
+    check(xray.result().config.scoring==next_rules && xray.result().bone_injuries[103].severity==0,
+        "Recovery arms the next fall with the latest damage thresholds and clean injuries");
 }
 void delayed_bail_feedback() {
     for (unsigned scenario=0;scenario<3;++scenario) {
@@ -273,6 +366,126 @@ void slow_motion_envelope() {
     check(pulse.step(options,event,3000,true).active,"A fresh severe impact can begin after the cooldown");
     event.reset();
     check(!pulse.step(options,event,3010,true).active,"Recovery or dismissal clears the impact and immediately cancels slow motion");
+    options.slow_motion_seconds=2; options.slow_motion_hold=.6f; options.effect_severity=700;
+    event.latest_impact_ms=4000; event.latest_severity=400;
+    check(!pulse.step(options,event,4000,true).active,"The saved severity threshold filters smaller hits");
+    event.latest_impact_ms=4600; event.latest_severity=800;
+    check(pulse.step(options,event,4600,true).started && pulse.step(options,event,5700,true).factor==options.slow_motion_scale,
+        "A longer configured pulse holds slow speed for its chosen fraction");
+    check(pulse.step(options,event,6200,true).factor>options.slow_motion_scale && !pulse.step(options,event,6600,true).active,
+        "The configurable hold still ends with a bounded smooth recovery");
+}
+void custom_audio() {
+    std::vector<std::byte> wav(52);
+    const auto put=[&](std::size_t at,unsigned value,unsigned count) {
+        for (unsigned i=0;i<count;++i) wav[at+i]=static_cast<std::byte>((value>>(i*8))&255);
+    };
+    std::memcpy(wav.data(),"RIFF",4); put(4,44,4); std::memcpy(wav.data()+8,"WAVEfmt ",8);
+    put(16,16,4); put(20,1,2); put(22,1,2); put(24,48000,4); put(28,96000,4); put(32,2,2); put(34,16,2);
+    std::memcpy(wav.data()+36,"data",4); put(40,8,4); put(46,1200,2);
+    const auto samples=decode_impact_wav(wav);
+    check(samples && samples->size()==4 && (*samples)[1]==1200,"A PCM16 mono 48 kHz replacement preserves its samples");
+    const auto saved=wav;
+    for (const auto [at,value] : {std::pair<std::size_t,unsigned>{20,3},{22,2},{24,44100},{34,8},{40,999999}}) {
+        wav=saved; put(at,value,at==24 || at==40 ? 4u : 2u);
+        check(!decode_impact_wav(wav),"Unsupported or truncated replacement WAVs are rejected");
+    }
+    wav=saved; wav.pop_back();
+    check(!decode_impact_wav(wav),"A truncated RIFF payload cannot become a playback buffer");
+    wav=saved; wav.resize(192046); put(4,192038,4); put(40,192002,4);
+    check(!decode_impact_wav(wav),"Replacement clips longer than two seconds are rejected");
+    wav=saved;
+    const std::array<std::byte,10> junk{std::byte{'J'},std::byte{'U'},std::byte{'N'},std::byte{'K'},std::byte{1},
+        std::byte{},std::byte{},std::byte{},std::byte{7},std::byte{}};
+    wav.insert(wav.begin()+12,junk.begin(),junk.end()); put(4,54,4);
+    check(decode_impact_wav(wav)==samples,"Optional odd-sized RIFF chunks are skipped with their padding");
+}
+void player_zoom_and_pass_out() {
+    const ZoomImpulse zoom{1000,1,.3f,.5f};
+    const auto start=sample_player_zoom(zoom,1000),hold=sample_player_zoom(zoom,1250),end=sample_player_zoom(zoom,1900);
+    check(start.active && start.fov_scale==1 && start.focus_weight==0,"Player zoom begins without a camera jump");
+    check(std::abs(hold.fov_scale-.7f)<.001f && hold.focus_weight==1 && end.fov_scale>hold.fov_scale && end.focus_weight<1,
+        "Player zoom holds on the skater then eases back with slow-motion recovery");
+    check(!sample_player_zoom(zoom,2000).active && !sample_player_zoom(zoom,999).active &&
+        !sample_player_zoom({1000,1,std::numeric_limits<float>::quiet_NaN(),.5f},1200).active,
+        "Expired or invalid zoom impulses leave the native view unchanged");
+    const ZoomImpulse gentle{1000,.85f,.3f,.45f};
+    check(sample_player_zoom(gentle,1020).fov_scale>.99f && sample_player_zoom(gentle,1080).focus_weight<.2f,
+        "The default zoom eases in over a quarter second instead of reaching full strength in eighty milliseconds");
+    float previous_fov=1;
+    for (std::uint64_t now=1000;now<=1850;++now) {
+        const auto frame=sample_player_zoom(gentle,now);
+        check(frame.fov_scale>=.7f && frame.fov_scale<=1 && frame.focus_weight>=0 && frame.focus_weight<=1 &&
+            std::abs(frame.fov_scale-previous_fov)<.003f,"Zoom enters and exits continuously without overshooting camera bounds");
+        previous_fov=frame.fov_scale;
+    }
+    VisualOptions options; options.pass_out_seconds=2;
+    VisualEvents event; event.latest_impact_ms=1000; event.latest_severity=500;
+    PassOutPulse fade;
+    check(fade.step(options,event,1000,true,true).darkness==0,"Pass-out starts transparently");
+    const auto peak=fade.step(options,event,1600,true,true);
+    check(peak.darkness>0 && peak.vignette==options.pass_out_strength && peak.hud_fade==peak.vignette,
+        "A severe fall darkens the screen edges and fades the score interface together");
+    options.pass_out_redness=.8f;
+    const auto red=fade.step(options,event,1600,true,true);
+    check(red.redness==.8f && red.darkness==peak.darkness && red.hud_fade==peak.hud_fade,
+        "The red tint slider applies immediately without changing fade timing or strength");
+    options.pass_out_redness=0;
+    check(fade.step(options,event,1600,true,true).redness==0,"Zero redness restores the black fade");
+    options.pass_out_hud=false;
+    check(fade.step(options,event,1700,true,true).hud_fade==0,"The score HUD can stay visible independently");
+    event.latest_impact_ms=1900;
+    check(fade.step(options,event,2700,true,true).darkness<peak.darkness && fade.step(options,event,3000,true,true).darkness==0,
+        "Further impacts do not prolong the pass-out envelope");
+    event.latest_impact_ms=3300;
+    check(fade.step(options,event,3600,true,true).darkness==0,"A completed fade cannot restart during the same fall");
+    fade.step(options,event,4000,true,false); event.latest_impact_ms=4200;
+    fade.step(options,event,4200,true,true);
+    check(fade.step(options,event,4600,true,true).darkness>0,"Recovery rearms the next fall's fade");
+    check(fade.step(options,event,4650,false,true).darkness==0 && fade.step(options,event,4700,true,true).darkness==0,
+        "Menu or focus interruption clears the fade without replaying it");
+    fade.step(options,event,5000,true,false); event.latest_impact_ms=5200; options.reduced_effects=true;
+    check(fade.step(options,event,5200,true,true).darkness==0,"Reduced effects suppresses pass-out presentation");
+    options.reduced_effects=false; event.latest_impact_ms=5400;
+    check(fade.step(options,event,5700,true,true).darkness==0,"Enabling effects mid-fall cannot replay suppressed pass-out");
+    fade.step(options,event,6000,true,false); event.latest_impact_ms=6200; event.latest_severity=50;
+    check(fade.step(options,event,6300,true,true).darkness==0,"Minor hits do not cause pass-out");
+    event.latest_impact_ms=6400; event.latest_fracture=true;
+    fade.step(options,event,6400,true,true);
+    check(fade.step(options,event,6800,true,true).darkness>0 && fade.step(options,event,6810,true,false).darkness==0,
+        "A newly fractured bone qualifies, while native recovery immediately clears the fade");
+}
+void smooth_player_follow() {
+    PlayerCameraFollow follow;
+    check(follow.step({0,0,0},1000,.12f)==Vec3{},"Follow starts at the current player position");
+    const auto first=follow.step({1,0,0},1016,.12f);
+    check(first[0]>0 && first[0]<.1f,"A physics position jump becomes a gentle camera acceleration");
+    check(follow.step({1,0,0},1016,.12f)==first,"Repeated render passes at the same time cannot advance smoothing twice");
+    float previous=first[0];
+    for (std::uint64_t now=1032;now<=1608;now+=16) {
+        const auto next=follow.step({1,0,0},now,.12f);
+        check(next[0]>=previous && next[0]<=1 && next[1]==0 && next[2]==0,
+            "Tracking continues between physics updates and settles without oscillation or overshoot");
+        previous=next[0];
+    }
+    check(previous>.999f,"Damped tracking converges to the player's position");
+    PlayerCameraFollow coarse,fine;
+    coarse.step({},1000,.12f); fine.step({},1000,.12f);
+    const auto at30=coarse.step({1,2,3},1200,.12f);
+    Vec3 at120{};
+    for (std::uint64_t now=1005;now<=1200;now+=5) at120=fine.step({1,2,3},now,.12f);
+    for (unsigned axis=0;axis<3;++axis)
+        check(std::abs(at30[axis]-at120[axis])<.00001f,"Follow response is independent of render frame rate");
+    check(follow.step({20,0,0},1624,.12f)==Vec3{20,0,0},"A teleport clears camera momentum rather than tracking across the map");
+    check(follow.step({21,0,0},2000,.12f)==Vec3{21,0,0},"A stalled render clock resets the follow filter");
+    check(follow.step({22,0,0},1900,.12f)==Vec3{22,0,0},"A reversed clock cannot integrate old camera velocity");
+    follow.reset();
+    check(follow.step({5,6,7},2100,.12f)==Vec3{5,6,7},"A fresh fall cannot inherit camera momentum");
+    check(follow.step({std::numeric_limits<float>::infinity(),0,0},2110,.12f)==Vec3{} &&
+        follow.step({8,9,10},2120,.12f)==Vec3{8,9,10},"Invalid tracking inputs reset safely");
+    PlayerCameraFollow fast,slow;
+    fast.step({},1000,.04f); slow.step({},1000,.4f);
+    check(fast.step({1,0,0},1100,.04f)[0]>slow.step({1,0,0},1100,.4f)[0],"The follow smoothing slider changes tracking responsiveness");
 }
 void visibility_and_flashes() {
     VisualOptions options;
@@ -312,6 +525,19 @@ void visibility_and_flashes() {
     const auto reduced=visual_appearance(options,result,events,4000,false);
     check(reduced.colors[277][0]==1 && reduced.colors[277][1]==.16f && reduced.colors[277][2]==.22f,
         "Reduced effects retains the steady fracture color and removes transient tints");
+    options.only_fractured=true;
+    for (const bool normal_play : {false,true}) {
+        const auto fractures=visual_appearance(options,result,events,4000,false,normal_play);
+        check(fractures.colors[277][3]==options.opacity && fractures.colors[277][0]==1 &&
+            fractures.colors[102][3]==0 && fractures.colors[7][3]==0,
+            "Fracture-only X-ray retains red broken bones and hides bruised and uninjured bones in attempts and normal play");
+    }
+    options.only_impacted=true;
+    check(visual_appearance(options,result,events,4000,false).colors[102][3]==0,
+        "Fracture-only display takes priority over the saved impacted-bones option");
+    options.only_fractured=false; options.only_impacted=false;
+    check(visual_appearance(options,result,events,4000,false).colors[102][3]==options.opacity,
+        "Disabling fracture-only display immediately restores bruised bones");
     check(events.impacts_at_ms[102]==2000 && events.impacts_at_ms[277]==4000,"A second bone keeps its own impact time");
     check(visual_appearance(options,result,events,4000,true).opacity==0,"First person hides the mesh before it can cover the camera");
     options.visibility=XrayVisibility::off;
@@ -350,7 +576,7 @@ void impact_camera_timing() {
     check(!pulse.step(options,event,2300,true).started_ms,"Minor contacts cannot shake the normal skating camera");
 }
 int main() {
-    saved_options(); visibility_and_flashes(); normal_play_falls(); normal_play_recovery_fade(); impact_feedback(); delayed_bail_feedback(); time_scale_ownership(); slow_motion_envelope(); impact_camera_timing();
+    saved_options(); visibility_and_flashes(); normal_play_falls(); normal_play_recovery_fade(); impact_feedback(); configurable_bone_damage(); delayed_bail_feedback(); time_scale_ownership(); slow_motion_envelope(); impact_camera_timing(); custom_audio(); player_zoom_and_pass_out(); smooth_player_follow();
     if (failures) return 1;
     std::cout<<"Slam visual timing, accessibility and saved-options checks passed.\n";
 }

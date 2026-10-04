@@ -10,9 +10,12 @@ namespace {
 Json config_json(const Config& c) {
     if (!valid_config(c)) throw std::invalid_argument("Invalid Slam configuration");
     const auto& s = c.scoring;
-    return Json{{"version",1}, {"kind",static_cast<unsigned>(c.kind)}, {"target",c.target},
+    auto doc=Json{{"version",1}, {"kind",static_cast<unsigned>(c.kind)}, {"target",c.target},
         {"rules",Json::array({s.impact_rate,s.fracture_bonus,s.fall_rate,s.airtime_rate,s.slide_rate,
             s.chain_step,s.chain_window_s,s.head_fracture,s.limb_fracture})}};
+    // Omitting the legacy default preserves existing personal-best keys.
+    if (s.bruise_threshold>0) doc["bruiseThreshold"]=s.bruise_threshold;
+    return doc;
 }
 bool bounded_integer(const Json& value, std::uint64_t maximum) {
     return value.is_number_integer() && (value.is_number_unsigned() || value.get<std::int64_t>() >= 0) &&
@@ -37,6 +40,12 @@ std::optional<Config> read_config(const Json& doc) {
         const double value = rules.at(i).get<double>();
         if (!std::isfinite(value) || value < 0 || value > 10000) return {};
         *fields[i] = static_cast<float>(value);
+    }
+    if (doc.contains("bruiseThreshold")) {
+        if (!doc.at("bruiseThreshold").is_number()) return {};
+        const double value=doc.at("bruiseThreshold").get<double>();
+        if (!std::isfinite(value) || value<0 || value>10000) return {};
+        c.scoring.bruise_threshold=static_cast<float>(value);
     }
     return valid_config(c) ? std::optional(c) : std::nullopt;
 }

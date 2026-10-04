@@ -46,7 +46,7 @@ bool decode_render_camera(std::span<const std::byte> input, RenderCamera& output
 // Edits a caller-owned view copy, preserving native SIMD metadata lanes.
 // The game's camera object and original render-view inputs remain untouched.
 bool offset_render_camera(std::span<std::byte> input,const Vec3& translation,float roll,float fov_scale,
-    RenderCamera& output) noexcept;
+    RenderCamera& output,const Vec3* target=nullptr,float focus_weight=0) noexcept;
 struct FractureLocation {
     float fraction=.53f,tilt_a{},tilt_b{};
     bool operator==(const FractureLocation&) const = default;

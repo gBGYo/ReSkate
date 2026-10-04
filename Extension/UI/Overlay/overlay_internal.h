@@ -273,6 +273,7 @@ void draw_skate_hud();
 bool nametags_pending();
 void draw_nametags();
 void draw_slam();
+void draw_slam_pass_out();
 // The profiler's HUD (drawn whenever it is on) and window (only in an interactive frame),
 // perf_overlay.cpp.
 bool perf_hud_pending();

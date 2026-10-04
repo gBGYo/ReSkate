@@ -94,8 +94,9 @@ void slam_challenge_cards(SkateMenu& menu,const slam::Snapshot& value) {
         float percent=rules.chain_step*100;
         if (rule(menu,"Chain bonus per extra hit",percent,0,100,"%.0f%%")) { rules.chain_step=percent/100; changed=true; }
         changed|=rule(menu,"Chain window",rules.chain_window_s,.25f,5,"%.2f seconds");
-        changed|=rule(menu,"Head fracture threshold",rules.head_fracture,10,10000);
-        changed|=rule(menu,"Other fracture threshold",rules.limb_fracture,10,10000);
+        changed|=rule(menu,"Bruise threshold",rules.bruise_threshold,0,std::min(rules.head_fracture,rules.limb_fracture));
+        changed|=rule(menu,"Head fracture threshold",rules.head_fracture,std::max(10.f,rules.bruise_threshold),10000);
+        changed|=rule(menu,"Other fracture threshold",rules.limb_fracture,std::max(10.f,rules.bruise_threshold),10000);
         note("Severity measures the squared speed lost into a confirmed contact. Harder hits score more. "
              "Chains add a bonus to each hit while the window lasts, capped at +300%. "
              "Each of the six body regions awards its fracture bonus once.");
@@ -156,7 +157,7 @@ void slam_challenge_cards(SkateMenu& menu,const slam::Snapshot& value) {
         for (std::size_t i=0;i<slam::region_count;++i) {
             const auto& injury=result.injuries[i];
             ImGui::Text("%s: %s",slam::region_name(static_cast<slam::Region>(i)),
-                injury.fractured ? "fractured" : injury.severity>0 ? "bruised" : "uninjured");
+                slam::injury_state_name(injury,result.config.scoring));
         }
         if (value.result_best_ready) best(value.result_best,result.config.kind);
         else note("Recording this result...");

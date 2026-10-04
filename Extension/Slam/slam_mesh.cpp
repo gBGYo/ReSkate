@@ -89,10 +89,13 @@ bool decode_render_camera(std::span<const std::byte> input, RenderCamera& output
     output=next;
     return true;
 }
-bool offset_render_camera(std::span<std::byte> input,const Vec3& translation,float roll,float fov_scale,RenderCamera& output) noexcept {
+bool offset_render_camera(std::span<std::byte> input,const Vec3& translation,float roll,float fov_scale,RenderCamera& output,
+    const Vec3* target,float focus_weight) noexcept {
     RenderCamera original;
     if (!decode_render_camera(input,original) || !std::isfinite(roll) || std::abs(roll)>.03f ||
-        !std::isfinite(fov_scale) || fov_scale<.8f || fov_scale>1 ||
+        !std::isfinite(fov_scale) || fov_scale<.55f || fov_scale>1 ||
+        !std::isfinite(focus_weight) || focus_weight<0 || focus_weight>1 ||
+        (target && !std::all_of(target->begin(),target->end(),[](float v) {return std::isfinite(v) && std::abs(v)<1e6f;})) ||
         !std::all_of(translation.begin(),translation.end(),[](float v) {return std::isfinite(v) && std::abs(v)<=.2f;})) return false;
     std::array<std::byte,320> candidate;
     std::copy(input.begin(),input.end(),candidate.begin());
@@ -102,6 +105,30 @@ bool offset_render_camera(std::span<std::byte> input,const Vec3& translation,flo
         world[axis]=original.world[axis]*cosine+original.world[4+axis]*sine;
         world[4+axis]=original.world[4+axis]*cosine-original.world[axis]*sine;
         world[12+axis]+=translation[0]*original.world[axis]+translation[1]*original.world[4+axis]+translation[2]*original.world[8+axis];
+    }
+    if (target && focus_weight>0) {
+        // Native cameras look along negative Z. Rotate the complete basis
+        // toward the local ragdoll center, capped at 20 degrees per view.
+        Vec3 backward{world[12]-(*target)[0],world[13]-(*target)[1],world[14]-(*target)[2]};
+        const float distance=std::sqrt(backward[0]*backward[0]+backward[1]*backward[1]+backward[2]*backward[2]);
+        if (distance>=.5f && distance<=50) {
+            for (auto& value : backward) value/=distance;
+            const float dot=world[8]*backward[0]+world[9]*backward[1]+world[10]*backward[2];
+            Vec3 axis{world[9]*backward[2]-world[10]*backward[1],world[10]*backward[0]-world[8]*backward[2],
+                world[8]*backward[1]-world[9]*backward[0]};
+            const float norm=std::sqrt(axis[0]*axis[0]+axis[1]*axis[1]+axis[2]*axis[2]);
+            if (dot>0 && norm>.00001f) {
+                for (auto& value : axis) value/=norm;
+                const float angle=std::min(std::acos(std::clamp(dot,-1.f,1.f)),.34906585f)*focus_weight;
+                const float c=std::cos(angle),s=std::sin(angle);
+                for (std::size_t row=0;row<3;++row) {
+                    const Vec3 v{world[row*4],world[row*4+1],world[row*4+2]};
+                    const Vec3 cross{axis[1]*v[2]-axis[2]*v[1],axis[2]*v[0]-axis[0]*v[2],axis[0]*v[1]-axis[1]*v[0]};
+                    const float projection=axis[0]*v[0]+axis[1]*v[1]+axis[2]*v[2];
+                    for (std::size_t i=0;i<3;++i) world[row*4+i]=v[i]*c+cross[i]*s+axis[i]*projection*(1-c);
+                }
+            }
+        }
     }
     for (std::size_t row=0;row<4;++row)
         std::memcpy(candidate.data()+0x40+row*16,world.data()+row*4,12);

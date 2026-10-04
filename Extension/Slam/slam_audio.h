@@ -5,5 +5,5 @@
 namespace dingosdk::slam {
 // Client thread only. Stops on conflicts/focus loss and consumes each new
 // confirmed impact once. Engine preparation never blocks a physics callback.
-std::string update_impact_audio(const VisualOptions& options,const VisualEvents& events,bool active) noexcept;
+std::string update_impact_audio(const VisualOptions& options,const VisualEvents& events,bool active,bool prepare_allowed) noexcept;
 }

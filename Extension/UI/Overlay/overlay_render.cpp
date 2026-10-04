@@ -522,6 +522,7 @@ void render(IDXGISwapChain* presented, UINT flags) {
         io.DisplaySize.y > 0 ? static_cast<float>(buffer_desc.Height) / io.DisplaySize.y : 1.f};
     update_menu_pointer();
     ImGui::NewFrame();
+    draw_slam_pass_out();
     if (menu_frame) {
         draw_menu();
         draw_console();

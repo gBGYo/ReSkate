@@ -4,6 +4,7 @@
 #include "Engine/Core/Platform/launcher_support.h"
 
 #include <array>
+#include <algorithm>
 #include <cmath>
 
 // The SKATER page.
@@ -234,19 +235,67 @@ void skater_page(SkateMenu& menu, const Model& model, const CallbacksV3& callbac
             }
             ImGui::EndCombo();
         }
+        auto injury_config=value.selected_config;
+        auto& injury_rules=injury_config.scoring;
+        bool thresholds_changed=false;
+        ImGui::BeginDisabled(!value.challenge_options_ready);
+        field(menu,"Bruise damage threshold"); ImGui::SetNextItemWidth(-FLT_MIN);
+        thresholds_changed|=ImGui::SliderFloat("##slam-bruise-threshold",&injury_rules.bruise_threshold,0.f,
+            std::min(injury_rules.head_fracture,injury_rules.limb_fracture),"%.0f",ImGuiSliderFlags_AlwaysClamp);
+        const float fracture_min=std::max(10.f,injury_rules.bruise_threshold);
+        field(menu,"Head fracture damage threshold"); ImGui::SetNextItemWidth(-FLT_MIN);
+        thresholds_changed|=ImGui::SliderFloat("##slam-head-fracture-threshold",&injury_rules.head_fracture,fracture_min,10000.f,
+            "%.0f",ImGuiSliderFlags_AlwaysClamp|ImGuiSliderFlags_Logarithmic);
+        field(menu,"Other bone fracture damage threshold"); ImGui::SetNextItemWidth(-FLT_MIN);
+        thresholds_changed|=ImGui::SliderFloat("##slam-limb-fracture-threshold",&injury_rules.limb_fracture,fracture_min,10000.f,
+            "%.0f",ImGuiSliderFlags_AlwaysClamp|ImGuiSliderFlags_Logarithmic);
+        ImGui::EndDisabled();
+        if (thresholds_changed) (void)dingosdk::slam::set_challenge_config(injury_config);
+        note("Higher thresholds require more accumulated damage. Changes apply to new attempts and the next normal-play fall.");
         ImGui::BeginDisabled(visuals.visibility==dingosdk::slam::XrayVisibility::off);
         field(menu,"Opacity"); ImGui::SetNextItemWidth(-FLT_MIN);
         changed|=ImGui::SliderFloat("##slam-xray-opacity",&visuals.opacity,.1f,1.f,"%.2f",ImGuiSliderFlags_AlwaysClamp);
+        if (toggle_row(menu,"Show only fractured bones","Show red fractured bones; hide yellow bruises and uninjured bones.",visuals.only_fractured,value.visual_options_ready)) changed=true;
+        ImGui::BeginDisabled(visuals.only_fractured);
         if (toggle_row(menu,"Only impacted bones","Reveal the bones involved in hard contacts; hide untouched bones.",visuals.only_impacted,value.visual_options_ready)) changed=true;
-        if (toggle_row(menu,"Reduced effects","Keep steady injury colors; disable flashes, camera impacts and slow motion.",visuals.reduced_effects,value.visual_options_ready)) changed=true;
+        ImGui::EndDisabled();
         if (toggle_row(menu,"Fracture marks","Show a persistent jagged crack on fractured bones.",visuals.fracture_marks,value.visual_options_ready)) changed=true;
-        if (toggle_row(menu,"Impact sound","Add a thud for contacts and a crunch when a bone fractures.",visuals.impact_sound,value.visual_options_ready)) changed=true;
+        ImGui::BeginDisabled(visuals.reduced_effects);
+        field(menu,"Impact flash strength"); ImGui::SetNextItemWidth(-FLT_MIN);
+        changed|=ImGui::SliderFloat("##slam-xray-flash",&visuals.flash_strength,0.f,1.f,"%.2f",ImGuiSliderFlags_AlwaysClamp);
+        ImGui::EndDisabled();
+        if (visuals.visibility==dingosdk::slam::XrayVisibility::impact) {
+            field(menu,"Visible after impact"); ImGui::SetNextItemWidth(-FLT_MIN);
+            changed|=ImGui::SliderFloat("##slam-xray-seconds",&visuals.impact_duration_s,.3f,5.f,"%.1f seconds",ImGuiSliderFlags_AlwaysClamp);
+        }
+        ImGui::EndDisabled();
+        ImGui::EndDisabled();
+        end_card();
+        begin_card(menu,"slam-effects","SLAM EFFECTS");
+        ImGui::BeginDisabled(!value.visual_options_ready);
+        if (toggle_row(menu,"Reduced effects","Keep injury colors and sounds; suppress flashes, zoom, shake, slow motion and pass-out fading.",visuals.reduced_effects,value.visual_options_ready)) changed=true;
+        if (toggle_row(menu,"Impact sound","Add a thud for confirmed body contacts.",visuals.impact_sound,value.visual_options_ready)) changed=true;
         ImGui::BeginDisabled(!visuals.impact_sound);
         field(menu,"Impact sound volume"); ImGui::SetNextItemWidth(-FLT_MIN);
         changed|=ImGui::SliderFloat("##slam-sound-volume",&visuals.sound_volume,0.f,1.f,"%.2f",ImGuiSliderFlags_AlwaysClamp);
         ImGui::EndDisabled();
+        if (toggle_row(menu,"Bone cracking sound","Play a separate dry crack when a bone first fractures.",visuals.fracture_sound,value.visual_options_ready)) changed=true;
+        ImGui::BeginDisabled(!visuals.fracture_sound);
+        field(menu,"Bone cracking volume"); ImGui::SetNextItemWidth(-FLT_MIN);
+        changed|=ImGui::SliderFloat("##slam-fracture-volume",&visuals.fracture_volume,0.f,1.f,"%.2f",ImGuiSliderFlags_AlwaysClamp);
+        std::array<char,241> crack_path{};
+        std::copy(visuals.fracture_sound_path.begin(),visuals.fracture_sound_path.end(),crack_path.begin());
+        field(menu,"Custom bone crack WAV"); ImGui::SetNextItemWidth(-FLT_MIN);
+        if (ImGui::InputText("##slam-crack-path",crack_path.data(),crack_path.size(),ImGuiInputTextFlags_EnterReturnsTrue)) {
+            visuals.fracture_sound_path=crack_path.data(); changed=true;
+        }
+        note("Optional file path; press Enter to apply. PCM16 mono, 48 kHz, at most 2 seconds. Empty uses built-in cracks.");
+        ImGui::EndDisabled();
         ImGui::BeginDisabled(visuals.reduced_effects);
-        if (toggle_row(menu,"Impact camera","Briefly punch in and shake the gameplay camera on severe hits or fractures.",visuals.impact_camera,value.visual_options_ready)) changed=true;
+        field(menu,"Severe impact threshold"); ImGui::SetNextItemWidth(-FLT_MIN);
+        changed|=ImGui::SliderFloat("##slam-effect-severity",&visuals.effect_severity,25.f,2000.f,"%.0f",ImGuiSliderFlags_AlwaysClamp);
+        note("Slow motion and shake trigger above this injury severity; a new fracture always qualifies.");
+        if (toggle_row(menu,"Impact camera shake","Briefly shake the gameplay camera on severe hits or fractures.",visuals.impact_camera,value.visual_options_ready)) changed=true;
         ImGui::BeginDisabled(!visuals.impact_camera);
         field(menu,"Camera impact strength"); ImGui::SetNextItemWidth(-FLT_MIN);
         changed|=ImGui::SliderFloat("##slam-camera-strength",&visuals.impact_camera_strength,0.f,1.f,"%.2f",ImGuiSliderFlags_AlwaysClamp);
@@ -259,27 +308,45 @@ void skater_page(SkateMenu& menu, const Model& model, const CallbacksV3& callbac
             visuals.slow_motion_scale=static_cast<float>(impact_speed)/100; changed=true;
         }
         field(menu,"Slow-motion duration"); ImGui::SetNextItemWidth(-FLT_MIN);
-        changed|=ImGui::SliderFloat("##slam-slow-motion-seconds",&visuals.slow_motion_seconds,.15f,1.f,"%.2f seconds",ImGuiSliderFlags_AlwaysClamp);
+        changed|=ImGui::SliderFloat("##slam-slow-motion-seconds",&visuals.slow_motion_seconds,.15f,3.f,"%.2f seconds",ImGuiSliderFlags_AlwaysClamp);
+        field(menu,"Slow-motion hold"); ImGui::SetNextItemWidth(-FLT_MIN);
+        changed|=ImGui::SliderFloat("##slam-slow-motion-hold",&visuals.slow_motion_hold,.1f,.8f,"%.2f of duration",ImGuiSliderFlags_AlwaysClamp);
+        if (toggle_row(menu,"Zoom on player","Ease toward the ragdoll during slow motion, then restore the native view.",visuals.player_zoom,value.visual_options_ready)) changed=true;
+        ImGui::BeginDisabled(!visuals.player_zoom);
+        field(menu,"Player zoom amount"); ImGui::SetNextItemWidth(-FLT_MIN);
+        changed|=ImGui::SliderFloat("##slam-player-zoom",&visuals.player_zoom_strength,0.f,.4f,"%.2f",ImGuiSliderFlags_AlwaysClamp);
+        field(menu,"Zoom easing time"); ImGui::SetNextItemWidth(-FLT_MIN);
+        changed|=ImGui::SliderFloat("##slam-zoom-ease",&visuals.player_zoom_ease_seconds,.08f,.6f,"%.2f seconds",ImGuiSliderFlags_AlwaysClamp);
+        field(menu,"Player follow smoothing"); ImGui::SetNextItemWidth(-FLT_MIN);
+        changed|=ImGui::SliderFloat("##slam-follow-smoothing",&visuals.player_follow_seconds,.04f,.4f,"%.2f seconds",ImGuiSliderFlags_AlwaysClamp);
+        note("Higher smoothing follows more gently. Camera shake is suppressed during player zoom.");
         ImGui::EndDisabled();
-        field(menu,"Impact flash strength"); ImGui::SetNextItemWidth(-FLT_MIN);
-        changed|=ImGui::SliderFloat("##slam-xray-flash",&visuals.flash_strength,0.f,1.f,"%.2f",ImGuiSliderFlags_AlwaysClamp);
         ImGui::EndDisabled();
-        if (visuals.visibility==dingosdk::slam::XrayVisibility::impact) {
-            field(menu,"Visible after impact"); ImGui::SetNextItemWidth(-FLT_MIN);
-            changed|=ImGui::SliderFloat("##slam-xray-seconds",&visuals.impact_duration_s,.3f,5.f,"%.1f seconds",ImGuiSliderFlags_AlwaysClamp);
-        }
+        if (toggle_row(menu,"Pass-out fade","Darken the view and close the edges once per hard fall, then fade back.",visuals.pass_out,value.visual_options_ready)) changed=true;
+        ImGui::BeginDisabled(!visuals.pass_out);
+        field(menu,"Pass-out strength"); ImGui::SetNextItemWidth(-FLT_MIN);
+        changed|=ImGui::SliderFloat("##slam-pass-out-strength",&visuals.pass_out_strength,0.f,1.f,"%.2f",ImGuiSliderFlags_AlwaysClamp);
+        field(menu,"Pass-out redness"); ImGui::SetNextItemWidth(-FLT_MIN);
+        changed|=ImGui::SliderFloat("##slam-pass-out-redness",&visuals.pass_out_redness,0.f,1.f,"%.2f",ImGuiSliderFlags_AlwaysClamp);
+        note("Zero keeps the fade black; increase to add a deep red tint.");
+        field(menu,"Pass-out duration"); ImGui::SetNextItemWidth(-FLT_MIN);
+        changed|=ImGui::SliderFloat("##slam-pass-out-seconds",&visuals.pass_out_seconds,.5f,4.f,"%.2f seconds",ImGuiSliderFlags_AlwaysClamp);
+        field(menu,"Pass-out impact threshold"); ImGui::SetNextItemWidth(-FLT_MIN);
+        changed|=ImGui::SliderFloat("##slam-pass-out-severity",&visuals.pass_out_severity,25.f,2000.f,"%.0f",ImGuiSliderFlags_AlwaysClamp);
+        if (toggle_row(menu,"Fade Slam HUD","Fade the score interface with the pass-out effect.",visuals.pass_out_hud,value.visual_options_ready)) changed=true;
         ImGui::EndDisabled();
-        if (ImGui::Button("Reset X-ray settings",ImVec2(-FLT_MIN,0))) {visuals={}; changed=true;}
+        ImGui::EndDisabled();
+        if (ImGui::Button("Reset visual and sound settings",ImVec2(-FLT_MIN,0))) {visuals={}; changed=true;}
         ImGui::EndDisabled();
         if (changed) (void)dingosdk::slam::set_visual_options(visuals);
         if (visuals.normal_play) note("Normal-play X-ray follows every fall and clears injury highlights after recovery. No attempt or reset is needed.");
         if (value.first_person) note("The skeleton is hidden while First person is enabled.");
         note("Ivory bones with blue uninjured patches, orange bruises and red fractures. X-ray settings are saved automatically.");
         if (!value.visual_save_status.empty()) note(value.visual_save_status.c_str());
-        if (visuals.impact_sound && !value.impact_audio_status.empty()) note(value.impact_audio_status.c_str());
-        if (visuals.reduced_effects) note("Reduced effects suppresses bright pulses, camera impacts and automatic slow motion.");
+        if ((visuals.impact_sound || visuals.fracture_sound) && !value.impact_audio_status.empty()) note(value.impact_audio_status.c_str());
+        if (visuals.reduced_effects) note("Reduced effects suppresses flashes, zoom, shake, automatic slow motion and pass-out fading.");
         else if (visuals.slow_motion && !value.slow_motion_status.empty()) note(value.slow_motion_status.c_str());
-        if (visuals.impact_camera && !visuals.reduced_effects && !value.impact_camera_available) note("Impact camera is unavailable in the current view.");
+        if ((visuals.impact_camera || (visuals.slow_motion && visuals.player_zoom)) && !visuals.reduced_effects && !value.impact_camera_available) note("Impact camera is unavailable in the current view.");
         end_card();
         if (ImGui::TreeNode("Telemetry")) {
             ImGui::Text("Samples: %llu  |  Rejected: %llu", static_cast<unsigned long long>(value.samples), static_cast<unsigned long long>(value.dropped));

@@ -17,6 +17,7 @@ struct ScoreRules {
     float fall_rate = 100, airtime_rate = 50, slide_rate = 25;
     float chain_step = .25f, chain_window_s = 1.5f;
     float head_fracture = 160, limb_fracture = 225;
+    float bruise_threshold{};
     bool operator==(const ScoreRules&) const = default;
 };
 struct Config {
@@ -75,6 +76,8 @@ struct Injury {
     float severity{}, flash{};
     bool fractured{};
 };
+bool is_bruised(const Injury& injury,const ScoreRules& rules) noexcept;
+const char* injury_state_name(const Injury& injury,const ScoreRules& rules) noexcept;
 struct Result {
     Config config;
     Phase phase = Phase::ready;

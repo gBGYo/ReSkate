@@ -39,6 +39,7 @@ struct Snapshot {
     bool slow_motion_active{};
     bool impact_camera_available{};
     float slow_motion_factor = 1;
+    PassOutFrame pass_out;
     std::uint64_t samples{}, dropped{}, pose_at_ms{};
     std::uint64_t rendered_poses{}, rejected_poses{};
     std::uint64_t animation_poses{}, export_poses{}, superseded_poses{};
@@ -58,6 +59,7 @@ Snapshot snapshot();
 Snapshot presentation_snapshot();
 bool hud_visible() noexcept;
 bool visuals_visible() noexcept;
+PassOutFrame pass_out_frame() noexcept;
 // Game thread publishes a short-lived, verified local-owner watch. Shared bail
 // hooks observe without changing the native selection, contacts or ragdoll.
 void tick(std::uintptr_t base, std::uintptr_t client, std::uintptr_t entity,

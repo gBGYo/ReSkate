@@ -347,6 +347,29 @@ void raster_camera_input() {
         "An out-of-bounds response cannot partially modify the view copy");
     check(!offset_render_camera(moved,{},std::numeric_limits<float>::quiet_NaN(),.94f,impact) && moved==unchanged,
         "A non-finite camera response is rejected before any modification");
+    auto focused=input;
+    const Vec3 player{-15,2,35};
+    check(offset_render_camera(focused,{},0,.7f,impact,&player,1) && impact.world[8]<0 &&
+        std::abs(impact.vertical_fov-45.5f)<.001f && impact.world[12]==-17,
+        "Slow-motion zoom turns toward the skater along native negative Z without moving through scenery");
+    const Vec3 far_side{-7,2,44};
+    focused=input;
+    check(offset_render_camera(focused,{},0,.6f,impact,&far_side,1) && impact.world[10]>=std::cos(.349066f)-.001f,
+        "Player framing is capped at twenty degrees even for a large lateral offset");
+    const Vec3 behind{-17,2,55};
+    focused=input;
+    check(offset_render_camera(focused,{},0,.7f,impact,&behind,1) && impact.world[8]==0 && impact.world[10]==1,
+        "A player behind the camera cannot flip the submitted view");
+    const auto before_bad_focus=focused;
+    const Vec3 invalid_target{std::numeric_limits<float>::infinity(),0,0};
+    check(!offset_render_camera(focused,{},0,.7f,impact,&invalid_target,1) && focused==before_bad_focus &&
+        !offset_render_camera(focused,{},0,.5f,impact,&player,1) && focused==before_bad_focus,
+        "Invalid targets and excessive zoom cannot partially change render inputs");
+    for (std::size_t i=0;i<input.size();++i) {
+        const bool xyz=i>=0x40 && i<0x80 && (i-0x40)%16<12;
+        const bool fov_byte=i>=0x104 && i<0x108;
+        check(xyz || fov_byte || focused[i]==input[i],"Player framing preserves native SIMD metadata and unrelated render fields");
+    }
     world[4]=1; // Individually unit-length axes must also be orthogonal.
     world[5]=0;
     std::memcpy(input.data()+0x40,world.data(),sizeof(world));
@@ -781,6 +804,9 @@ void saved_personal_bests() {
     constexpr std::string_view map="levels/test/slam";
     const auto document=encode_personal_best(map,config,best);
     check(decode_personal_best(document,map,config)==std::optional(best),"Completed personal bests survive a saved-state round trip");
+    auto higher_bruise=config; higher_bruise.scoring.bruise_threshold=100;
+    check(personal_best_key(map,config)!=personal_best_key(map,higher_bruise) &&
+        !decode_personal_best(document,map,higher_bruise),"Changing injury rules cannot mix personal-best records");
     auto different=config; different.scoring.chain_step=.5f;
     check(personal_best_key(map,config)!=personal_best_key(map,different) &&
         personal_best_key(map,config)!=personal_best_key("levels/test/other",config),"Maps and scoring rules use separate personal bests");
@@ -794,6 +820,25 @@ void saved_personal_bests() {
     check(!best.record(lower) && best==saved,"Cancelled attempts cannot change any personal-best field");
     check(!decode_personal_best("{}",map,config) && !decode_personal_best(std::string(4097,' '),map,config),
         "Malformed and oversized best records are rejected");
+}
+void saved_damage_thresholds() {
+    const Config defaults;
+    constexpr std::string_view legacy=R"({"version":1,"kind":0,"target":5000,"rules":[10,500,100,50,25,0.25,1.5,160,225]})";
+    check(decode_config(legacy)==std::optional(defaults) && encode_config(defaults).find("bruiseThreshold")==std::string::npos,
+        "Older scoring saves retain any-damage bruises and their original personal-best identity");
+    Config configured; configured.scoring.bruise_threshold=120;
+    configured.scoring.head_fracture=500; configured.scoring.limb_fracture=800;
+    check(decode_config(encode_config(configured))==std::optional(configured),
+        "Bruise, head fracture and other fracture thresholds survive saved configuration");
+    const auto encoded=encode_config(configured);
+    for (const auto bad_value : {"true","-1","10001","600"}) {
+        auto bad=encoded;
+        const auto at=bad.find("\"bruiseThreshold\":120");
+        bad.replace(at,std::string_view("\"bruiseThreshold\":120").size(),std::string("\"bruiseThreshold\":")+bad_value);
+        check(!decode_config(bad),"Invalid or above-fracture bruise thresholds are rejected");
+    }
+    configured.scoring.bruise_threshold=std::numeric_limits<float>::quiet_NaN();
+    check(!valid_config(configured),"A non-finite bruise threshold cannot reach injury classification");
 }
 }
 void personal_best_transactions() {
@@ -844,6 +889,7 @@ void personal_best_transactions() {
 int main() {
     lifecycle(); contact_scoring(); same_region(); invalidation(); free_fall_and_rest(); recovery_and_timeout(); native_regressions(); camera_timing(); rendered_pose(); mesh_skinning(); rendered_world_skinning(); raster_camera_input(); render_root_timing(); mesh_streams(); individual_bone_hits(); pose_publication_order(); challenge_progression(); saved_personal_bests();
     personal_best_transactions();
+    saved_damage_thresholds();
     varied_fracture_planes(); rapid_head_hits_and_contact_episodes(); contact_record_selection(); rotational_contacts(); impacts_before_bail(); board_landing_load();
     if (failures) return 1;
     std::cout << "Slam Challenge scoring and lifecycle checks passed.\n";

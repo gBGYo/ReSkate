@@ -5,14 +5,34 @@
 #include <algorithm>
 
 namespace dingosdk::overlay::detail {
+void draw_slam_pass_out() {
+    const auto fade=slam::pass_out_frame();
+    if (fade.darkness<=0 && fade.vignette<=0) return;
+    const auto* viewport=ImGui::GetMainViewport();
+    const auto p=viewport->Pos,size=viewport->Size;
+    auto* draw=ImGui::GetBackgroundDrawList();
+    const auto color=[&](float alpha) {
+        return ImGui::GetColorU32(ImVec4(.35f*fade.redness,0,0,std::clamp(alpha,0.f,1.f)));
+    };
+    draw->AddRectFilled(p,ImVec2(p.x+size.x,p.y+size.y),color(fade.darkness));
+    const float edge=size.y*.35f*fade.vignette;
+    const auto dark=color(fade.vignette),clear=color(0);
+    draw->AddRectFilledMultiColor(p,ImVec2(p.x+size.x,p.y+edge),dark,dark,clear,clear);
+    draw->AddRectFilledMultiColor(ImVec2(p.x,p.y+size.y-edge),ImVec2(p.x+size.x,p.y+size.y),clear,clear,dark,dark);
+    const float side=size.x*.18f*fade.vignette;
+    draw->AddRectFilledMultiColor(p,ImVec2(p.x+side,p.y+size.y),dark,clear,clear,dark);
+    draw->AddRectFilledMultiColor(ImVec2(p.x+size.x-side,p.y),ImVec2(p.x+size.x,p.y+size.y),clear,dark,dark,clear);
+}
 void draw_slam() {
     if (!slam::hud_visible()) return;
     const auto value = slam::snapshot();
     if (!value.visible) return;
     const auto& result = value.result;
+    const float hud_alpha=ImGui::GetStyle().Alpha*(1-slam::pass_out_frame().hud_fade);
+    ImGui::PushStyleVar(ImGuiStyleVar_Alpha,hud_alpha);
     ImGui::SetNextWindowPos(ImVec2(24, 110), ImGuiCond_Always);
     ImGui::SetNextWindowSize(ImVec2(360,0),ImGuiCond_Always);
-    ImGui::SetNextWindowBgAlpha(.8f);
+    ImGui::SetNextWindowBgAlpha(.8f*hud_alpha);
     ImGui::Begin("Slam Challenge HUD", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
         ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing);
     ImGui::PushTextWrapPos(0);
@@ -59,8 +79,9 @@ void draw_slam() {
             static_cast<unsigned long long>(result.airtime_points),static_cast<unsigned long long>(result.slide_points));
         ImGui::Text("Best chain: %u impacts",result.best_chain);
         for (std::size_t i = 0; i < slam::region_count; ++i) {
-            if (result.injuries[i].severity <= 0) continue;
-            ImGui::Text("%s: %s", slam::region_name(static_cast<slam::Region>(i)), result.injuries[i].fractured ? "fractured" : "bruised");
+            const auto& injury=result.injuries[i];
+            if (!injury.fractured && !slam::is_bruised(injury,result.config.scoring)) continue;
+            ImGui::Text("%s: %s", slam::region_name(static_cast<slam::Region>(i)), slam::injury_state_name(injury,result.config.scoring));
         }
         if (!value.best_save_status.empty()) ImGui::TextUnformatted(value.best_save_status.c_str());
     }
@@ -70,5 +91,6 @@ void draw_slam() {
     }
     ImGui::PopTextWrapPos();
     ImGui::End();
+    ImGui::PopStyleVar();
 }
 }

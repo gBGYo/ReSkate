@@ -81,6 +81,10 @@ struct State {
     SlowMotionPulse slow_pulse;
     ImpactCameraPulse camera_pulse;
     CameraImpulse camera_impact;
+    ZoomImpulse player_zoom;
+    PlayerCameraFollow player_follow;
+    std::uint64_t follow_started_ms{};
+    PassOutPulse pass_out;
     CameraMotion previous_camera_motion;
     std::uintptr_t previous_effect_camera{};
     std::uint64_t camera_logged_impulse{};
@@ -344,10 +348,11 @@ std::optional<ImpactViews> impact_views(std::uintptr_t current_view,std::uintptr
     auto& s=state();
     if (!s.camera_contracts_ok.load(std::memory_order_acquire) || !s.draw_active.load(std::memory_order_acquire) || s.effects_suspended.load(std::memory_order_acquire) ||
         !gameplay_focused() || current_view<0x10050 || previous_view<0x10050) return {};
-    Watch watch; CameraImpulse impulse; CameraMotion previous;
+    Watch watch; CameraImpulse impulse; ZoomImpulse zoom; Vec3 target; CameraMotion previous; float follow_seconds{};
     {
         std::lock_guard lock(s.mutex);
-        watch=s.watch; impulse=s.camera_impact;
+        watch=s.watch; impulse=s.camera_impact; zoom=s.player_zoom; target=s.last.center;
+        follow_seconds=s.published.visuals.player_follow_seconds;
         if (s.published.first_person) return {};
     }
     if (GetTickCount64()>=watch.until) return {};
@@ -360,7 +365,13 @@ std::optional<ImpactViews> impact_views(std::uintptr_t current_view,std::uintptr
     // Live main perspective input uses projection kind 0; kind 3 is a
     // separate projection branch. Preserve all projection-specific fields.
     if (!read(current_view-0x50+0x18,kind) || kind || !read(current_view+0x100,projection) || projection!=0) return {};
-    const auto motion=sample_camera_impulse(impulse,GetTickCount64());
+    const auto now=GetTickCount64();
+    auto motion=sample_camera_impulse(impulse,now);
+    const auto zoom_motion=sample_player_zoom(zoom,now);
+    if (zoom_motion.active) {
+        // Smooth tracking takes precedence over the independent impact shake.
+        motion=zoom_motion;
+    }
     {
         std::lock_guard lock(s.mutex);
         if (s.previous_effect_camera==camera->camera) previous=s.previous_camera_motion;
@@ -374,15 +385,26 @@ std::optional<ImpactViews> impact_views(std::uintptr_t current_view,std::uintptr
     const Vec3 delta{unmodified.world[12]-camera->world[12],unmodified.world[13]-camera->world[13],unmodified.world[14]-camera->world[14]};
     if (!finite(delta) || length(delta)>10 || !resolve_local_bail_owner(watch.client,watch.owner.entity,views.owner) || views.owner!=watch.owner ||
         !read(current_view,current_check) || current_check!=views.current || !read(previous_view,previous_check) || previous_check!=views.previous) return {};
+    {
+        std::lock_guard lock(s.mutex);
+        if (s.watch.owner!=watch.owner || s.published.first_person || s.effects_suspended.load() ||
+            now>=s.watch.until) return {};
+        if (zoom_motion.active) {
+            if (s.previous_effect_camera!=camera->camera || s.follow_started_ms!=zoom.started_ms) s.player_follow.reset();
+            motion.target=s.player_follow.step(target,now,follow_seconds);
+            s.follow_started_ms=zoom.started_ms;
+        } else {s.player_follow.reset(); s.follow_started_ms=0;}
+    }
     views.source_current=views.current;
-    if (!offset_render_camera(views.current,motion.translation,motion.roll,motion.fov_scale,views.camera) ||
-        !offset_render_camera(views.previous,previous.translation,previous.roll,previous.fov_scale,old)) return {};
+    if (!offset_render_camera(views.current,motion.translation,motion.roll,motion.fov_scale,views.camera,&motion.target,motion.focus_weight) ||
+        !offset_render_camera(views.previous,previous.translation,previous.roll,previous.fov_scale,old,&previous.target,previous.focus_weight)) return {};
     {
         std::lock_guard lock(s.mutex);
         if (s.watch.owner!=watch.owner || GetTickCount64()>=s.watch.until) return {};
         s.previous_effect_camera=camera->camera; s.previous_camera_motion=motion;
-        if (motion.active && s.camera_logged_impulse!=impulse.started_ms) {
-            s.camera_logged_impulse=impulse.started_ms;
+        const auto started=std::max(impulse.started_ms,zoom.started_ms);
+        if (motion.active && s.camera_logged_impulse!=started) {
+            s.camera_logged_impulse=started;
             logging::log(logging::Level::info,logging::Channel::skater,
                 "Impact camera submitted: strength {:.2f}, native FOV {:.2f} -> {:.2f} degrees.",
                 impulse.strength,unmodified.vertical_fov,views.camera.vertical_fov);
@@ -731,6 +753,16 @@ bool set_bail_controls(const BailControls& controls) noexcept {
 }
 bool hud_visible() noexcept { return state().visible.load(std::memory_order_acquire); }
 bool visuals_visible() noexcept { return state().draw_active.load(std::memory_order_acquire); }
+PassOutFrame pass_out_frame() noexcept {
+    try {
+        auto& s=state();
+        if (!s.draw_active.load(std::memory_order_acquire) || s.effects_suspended.load(std::memory_order_acquire) ||
+            s.effects_cancel_requested.load(std::memory_order_acquire) || !gameplay_focused()) return {};
+        std::lock_guard lock(s.mutex);
+        if (!s.last.valid || !s.last.bailed || GetTickCount64()-s.last_at>=250) return {};
+        return s.published.pass_out;
+    } catch (...) {return {};}
+}
 void tick(std::uintptr_t base, std::uintptr_t client, std::uintptr_t entity, bool ready,
     bool offline, bool no_bail, bool noclip, bool editor, bool first_person, std::string_view map) noexcept {
     try {
@@ -1059,9 +1091,15 @@ void tick(std::uintptr_t base, std::uintptr_t client, std::uintptr_t entity, boo
             !s.retry.active() &&
             !s.effects_cancel_requested.exchange(false,std::memory_order_acq_rel) && GetTickCount64()-s.last_at<250 &&
             (effects_options.normal_play || (s.published.visible && s.published.xray_context_valid));
-        const bool camera_allowed=effects_allowed && !first_person && gameplay_focused();
+        const bool feedback_allowed=effects_allowed && s.last.valid && s.last.bailed;
+        const bool camera_allowed=feedback_allowed && !first_person && gameplay_focused();
         s.camera_impact=s.camera_pulse.step(effects_options,effects_events,GetTickCount64(),camera_allowed);
-        if (!camera_allowed) {s.previous_camera_motion={}; s.previous_effect_camera=0;}
+        if (!camera_allowed) {
+            s.player_zoom={}; s.player_follow.reset(); s.follow_started_ms=0;
+            s.previous_camera_motion={}; s.previous_effect_camera=0;
+        }
+        s.published.pass_out=s.pass_out.step(effects_options,effects_events,GetTickCount64(),
+            feedback_allowed && gameplay_focused(),s.last.valid && s.last.bailed);
         s.published.impact_camera_available=s.view_hook_ok && s.camera_contracts_ok.load(std::memory_order_acquire);
         // Native setting listeners can call back into game systems. Invoke
         // them with no Slam mutex held; presentation only reads the result.
@@ -1070,9 +1108,14 @@ void tick(std::uintptr_t base, std::uintptr_t client, std::uintptr_t entity, boo
         if (retry_dispatch && retry_dispatch->generation==s.level_generation.load() && ready && offline &&
             !no_bail && !noclip && !editor && !first_person && !s.effects_suspended.load())
             retry_submission=submit_owned_skater_teleport(client,retry_dispatch->owner,retry_dispatch->transform);
-        const auto pulse=update_time_effect(effects_options,effects_events,effects_allowed && !first_person && gameplay_focused());
-        const auto audio_status=update_impact_audio(effects_options,effects_events,effects_allowed);
+        const auto pulse=update_time_effect(effects_options,effects_events,camera_allowed);
+        const auto audio_status=update_impact_audio(effects_options,effects_events,feedback_allowed,effects_allowed);
         lock.lock();
+        if (!pulse.active || !camera_allowed || !effects_options.player_zoom || effects_options.player_zoom_strength<=0)
+            s.player_zoom={};
+        else if (pulse.started)
+            s.player_zoom={GetTickCount64(),effects_options.slow_motion_seconds,effects_options.player_zoom_strength,
+                effects_options.slow_motion_hold,effects_options.player_zoom_ease_seconds};
         if (retry_dispatch && s.retry.active() && retry_dispatch->generation==s.level_generation.load()) {
             if (retry_submission.state==SkaterTeleportState::submitted) {
                 s.retry.submitted(retry_submission.receipt,GetTickCount64());
@@ -1176,7 +1219,7 @@ void observe_skeleton(std::uintptr_t rig, float seconds, bool wipeout) noexcept 
         s.challenge.step(frame);
         if (s.published.visuals.normal_play) {
             const auto previous_impacts=s.normal_xray.result().impacts;
-            s.normal_xray.step(frame,GetTickCount64());
+            s.normal_xray.step(frame,GetTickCount64(),s.published.selected_config.scoring);
             if (s.normal_xray.result().impacts>previous_impacts)
                 logging::log(logging::Level::info,logging::Channel::skater,"Normal-play X-ray: {} impacts tracked this fall.",s.normal_xray.result().impacts);
         }

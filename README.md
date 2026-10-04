@@ -127,6 +127,16 @@ automatically clears injury highlights after recovery, and does not open the Sla
 The same visibility settings apply; **During attempts** becomes **Always** in normal play.
 Choose **Always** and disable **Only impacted bones** for a continuously visible full skeleton, or
 choose **After impacts** with **Only impacted bones** for repeatable impact effects. The toggle is saved.
+Enable **Show only fractured bones** under **Skater → SLAM → X-RAY** to show only red broken bones,
+hiding yellow bruises and uninjured bones. It takes priority over **Only impacted bones**, saves
+automatically and applies to attempts and normal-play X-ray. Turn it off to restore your previous display.
+The **Bruise damage threshold**, **Head fracture damage threshold** and **Other bone fracture damage
+threshold** sliders in **X-RAY** control when accumulated confirmed damage marks a bone yellow or red.
+Higher values require more damage. Bruising starts at any positive damage by default; head and other
+fracture thresholds remain 160 and 225. Damage below the bruise threshold stays unmarked and is hidden
+by **Only impacted bones**. These are the same fracture rules used for scoring, fracture sounds and marks.
+Settings save automatically and apply to new attempts and the next normal-play fall; a fall already in
+progress retains its starting thresholds. Normal-play X-ray uses the selected damage rules too.
 Normal-play X-ray works with No Bail enabled; Noclip, Park Editor, loading and online play pause it.
 Enable **Only impacted bones** to hide untouched parts and reveal the body bones involved in detected
 contacts. A forearm hit reveals the forearm separately from the hand or upper arm. Fingers follow their
@@ -163,19 +173,41 @@ geometry. A fresh fracture briefly opens the split before it settles; further co
 do not restart the opening. Its position and angle vary between bones and falls, staying fixed after
 that bone breaks. Cuts can occur anywhere from 10% to 90% along each bone's actual geometry,
 leaving a small margin at either end.
-**Impact sound** adds an original thud/crunch clip for confirmed contacts, with its own volume
-slider. Playback stops while the menu is open or the game loses focus. **Impact slow motion** briefly
-slows severe hits and newly fractured bones, then smoothly returns to the previous game speed. Its speed
-and duration are adjustable; further contacts cannot extend a running pulse. Loading, online play,
-recovery, mode conflicts, an open menu or focus loss restore the prior speed. A later player or engine speed change
-takes priority. **Impact camera** adds a bounded 450ms punch-in and damped shake on severe hits or
-new fractures, with adjustable strength. It applies to the submitted gameplay view and the skeleton
-together, preserving the game's original camera state. First person and Free camera pause it.
-**Reduced effects** removes the bright pulse, animated fracture opening, impact camera and automatic slow motion while retaining
-steady injury colors and fracture marks. These effects are presentation;
-they do not split the native ragdoll bones. Native time-scale sampling during repeated live falls
-confirmed the default 30% pulse easing back to 100%. The subjective impact feel is still undergoing
-live validation.
+Under **Skater → SLAM → SLAM EFFECTS**, **Impact sound** adds a thud for confirmed contacts.
+**Bone cracking sound** adds separate dry splinter transients with four texture variants when a bone
+first fractures. Both have independent switches and volume sliders. An optional **Custom bone crack
+WAV** path replaces the generated crack with your own recording: PCM16, mono, 48 kHz, at most two
+seconds. Enter the file path and press Enter; an empty path uses built-in cracks. Missing or unsupported
+files fall back to built-in cracks and show a status message. Audio prepares in the background while
+skating, and playback stops on recovery, menus or focus loss.
+**Impact slow motion** slows severe hits and newly fractured bones, holds the configured speed,
+then smoothly returns to the previous game speed. Speed, duration (0.15–3 seconds), hold fraction
+and severity threshold are adjustable; further contacts cannot extend a running pulse. The new default
+is 30% speed for 0.85 seconds, holding for 45% of that duration before recovering. Existing saved
+durations and sound-off preferences are retained. Loading, online play, recovery, mode conflicts,
+an open menu or focus loss restore the prior speed. A later player or engine speed change takes priority.
+**Impact camera shake** adds a bounded 450ms punch-in and damped shake on severe hits or new fractures,
+with adjustable strength. It applies to the submitted gameplay view and the skeleton together,
+preserving the game's original camera state. **Zoom on player** independently eases the view toward
+the ragdoll center during a successful slow-motion pulse, then restores native framing with the speed
+recovery. **Zoom easing time** controls the approach (0.25 seconds by default). **Player follow smoothing**
+adds damped tracking on the render clock, keeping movement continuous between physics samples;
+higher values follow more gently. Impact shake is suppressed during player zoom. Its switch and zoom
+amount are adjustable; framing turns are capped at 20 degrees and do not move the camera through
+scenery. First person and Free camera pause camera effects.
+**Pass-out fade** gradually darkens the view and closes its edges after a severe hit or new fracture,
+then fades back. It triggers once per fall; recovery immediately clears it and rearms the next fall.
+Its switch, strength, duration and severity threshold are configurable. **Pass-out redness** adds a deep
+red tint to the darkening and vignette; zero restores black, with a subtle 0.15 tint by default.
+The redness slider changes color independently of fade strength and timing. **Fade Slam HUD** also fades
+the score interface, including its background, and can be disabled independently. Menus, loading,
+focus loss, stale telemetry and mode conflicts clear the fade. These effects also work with normal-play
+X-ray enabled, and their controls remain available when skeleton visibility is Off. Settings save automatically.
+**Reduced effects** removes flashes, animated fracture opening, camera effects, automatic slow motion
+and pass-out fading while retaining steady injury colors, fracture marks and sounds. These effects
+are presentation; they do not split native ragdoll bones. Native time-scale sampling during repeated
+live falls confirmed the earlier 30% pulse easing back to 100%. The new zoom, fade and crack sounds
+pass automated regressions and compile in the runtime; their subjective feel still needs in-game validation.
 The mesh hides in First person to keep the skull from covering the camera, while the challenge keeps scoring.
 The current X-ray pass draws through scenery as well as the skater; scene occlusion remains part of
 the full-mode work. No extracted game assets are shipped.

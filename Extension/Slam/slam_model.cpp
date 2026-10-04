@@ -93,7 +93,15 @@ bool valid_config(const Config& config) noexcept {
     return std::isfinite(s.chain_step) && s.chain_step >= 0 && s.chain_step <= 1 &&
         std::isfinite(s.chain_window_s) && s.chain_window_s >= .25f && s.chain_window_s <= 5 &&
         std::isfinite(s.head_fracture) && s.head_fracture >= 10 && s.head_fracture <= 10000 &&
-        std::isfinite(s.limb_fracture) && s.limb_fracture >= 10 && s.limb_fracture <= 10000;
+        std::isfinite(s.limb_fracture) && s.limb_fracture >= 10 && s.limb_fracture <= 10000 &&
+        std::isfinite(s.bruise_threshold) && s.bruise_threshold>=0 &&
+        s.bruise_threshold<=std::min(s.head_fracture,s.limb_fracture);
+}
+bool is_bruised(const Injury& injury,const ScoreRules& rules) noexcept {
+    return !injury.fractured && injury.severity>0 && injury.severity>=rules.bruise_threshold;
+}
+const char* injury_state_name(const Injury& injury,const ScoreRules& rules) noexcept {
+    return injury.fractured ? "fractured" : is_bruised(injury,rules) ? "bruised" : "uninjured";
 }
 const char* phase_name(Phase phase) noexcept {
     switch (phase) {
