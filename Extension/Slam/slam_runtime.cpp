@@ -51,7 +51,7 @@ struct State {
     Frame last;
     std::optional<Action> pending;
     std::uint64_t last_at{};
-    bool bail_latched{}, contracts_checked{}, contracts_ok{};
+    bool bail_latched{}, manual_bail_origin{}, contracts_checked{}, contracts_ok{};
     bool pose_hooks_checked{}, pose_hooks_ok{};
     std::string map, diagnostic, pose_diagnostic,retry_diagnostic;
     std::future<std::shared_ptr<const SkeletonMesh>> mesh_load;
@@ -472,7 +472,7 @@ bool install_view_hook(std::uintptr_t base) {
 }
 bool contracts(std::uintptr_t base) {
     if (!no_bail_available()) return false;
-    for (const auto& contract : {layout::contacts, layout::skeleton}) {
+    for (const auto& contract : {layout::contacts, layout::skeleton, layout::body_transform, layout::hard_landing}) {
         std::array<unsigned char, 32> actual{};
         if (!read(base + contract.rva, actual) || actual != contract.bytes) return false;
     }
@@ -484,6 +484,7 @@ bool capture(const LocalBailOwner& owner, float dt, bool bailed, Frame& frame, S
     frame.world = owner.world;
     frame.dt = dt;
     frame.bailed = bailed;
+    frame.manual_bail = state().manual_bail_origin;
     std::uint32_t parts_count{};
     const auto pose = pointer(owner.rig + layout::pose_output);
     std::array<unsigned char, 0x24> pose_bytes{};
@@ -537,25 +538,31 @@ bool capture(const LocalBailOwner& owner, float dt, bool bailed, Frame& frame, S
         auto& body = frame.bodies[i-1];
         body.region = *mapped;
         body.joint=joint;
+        const auto injury_joint=injury_joint_for_body(joint);
+        if (!injury_joint) {output.availability="Unsupported injury body mapping."; return false;}
+        body.injury_joint=*injury_joint;
         const auto part = parts + i*layout::body_stride;
         std::uint8_t contact{};
         if (pointer(part + 0x10) != physics || !read(part + layout::velocity, body.velocity) ||
             !finite(body.velocity) || length(body.velocity) > 300 ||
             !read(contacts + layout::contact_flags + i, contact) || contact > 1) return false;
         body.contact = contact != 0;
+        body.pose_valid=read(part+layout::body_pose,body.pose);
         if (body.contact) {
             ++output.contacts;
-            const auto valid_normal = [](const Vec3& normal) { return finite(normal) && length(normal) >= .5f && length(normal) <= 1.5f; };
-            if (!read(contacts + layout::normals + i*layout::normal_stride, body.normal) || !valid_normal(body.normal)) {
-                // Some accepted contacts have only the second normal, or no
-                // detailed normal yet. Those cannot invalidate other bodies'
-                // telemetry or create an impact without a verified direction.
-                if (!read(contacts + layout::normals + i*layout::normal_stride + 0x10, body.normal) || !valid_normal(body.normal)) {
-                    body.contact = false;
-                    continue;
-                }
-            }
-            frame.grounded = frame.grounded || body.normal[1]/length(body.normal) > .5f;
+            std::array<unsigned char,layout::normal_stride> record{};
+            const auto detail=read(contacts + layout::normals + i*layout::normal_stride,record) ?
+                decode_contact_detail(record) : std::nullopt;
+            body.normal_valid=detail.has_value();
+            // Preserve the raw flag when detail is absent: missing direction
+            // must neither invalidate unrelated bodies nor rearm a held hit.
+            if (!detail) continue;
+            body.normal=detail->normal;
+            body.contact_speed=detail->speed;
+            body.speed_valid=true;
+            body.contact_point=detail->point;
+            body.point_valid=detail->point_valid;
+            frame.grounded = frame.grounded || detail->grounded;
         }
     }
     if (!hips) { output.availability = "The skeleton has no mapped hips joint."; return false; }
@@ -571,6 +578,32 @@ bool capture(const LocalBailOwner& owner, float dt, bool bailed, Frame& frame, S
     if (!bailed) frame.grounded = (output.physics_state >= 100 && output.physics_state < 200) ||
         (output.physics_state >= 400 && output.physics_state < 500);
     frame.body_count = layout::body_count - 1;
+    const auto board=pointer(pointer(owner.core+0x430)+0x18);
+    const auto board_parts=pointer(board+0x20);
+    std::uint32_t board_count{};
+    Vec3 board_velocity{},support_normal{};
+    float landing_speed{};
+    std::uint8_t hard_landing{};
+    const auto causes=pointer(owner.core+0x428);
+    if (board && pointer(board)==owner.base+layout::owned_board_vtable && board_parts &&
+        read(board_parts,board_count) && board_count==9 &&
+        pointer(board_parts+layout::body_stride+0x10)==board &&
+        read(board_parts+layout::body_stride+layout::velocity,board_velocity) &&
+        finite(board_velocity) && length(board_velocity)<=300) {
+        frame.board.identity=board;
+        frame.board.velocity=board_velocity;
+        frame.board.riding=output.physics_state>=100 && output.physics_state<300;
+        if (causes && pointer(causes+0x20)==owner.context &&
+            read(causes+0x28+6,hard_landing) && hard_landing==1 &&
+            read(causes+0x4c+6*4,landing_speed) && std::isfinite(landing_speed) &&
+            landing_speed>=3 && landing_speed<=300 &&
+            read(owner.context+0x4b0,support_normal) && finite(support_normal) &&
+            length(support_normal)>=.5f && length(support_normal)<=1.5f) {
+            frame.board.hard_landing=true;
+            frame.board.speed=landing_speed;
+            frame.board.normal=support_normal;
+        }
+    }
     frame.valid = true;
     return true;
 }
@@ -978,7 +1011,7 @@ void tick(std::uintptr_t base, std::uintptr_t client, std::uintptr_t entity, boo
         if (!bail_context || !window_focused || (!shortcuts && GetTickCount64()>=s.explicit_bail_until)) cancel_manual_bail();
         if (explicit_bail || key_pressed || pad_pressed) {
             const bool accepted=!bail_issue && window_focused && queue_manual_bail(client,entity);
-            if (accepted && explicit_bail) s.explicit_bail_until=GetTickCount64()+500;
+            if (accepted) s.explicit_bail_until=GetTickCount64()+500;
             s.published.bail_status=accepted ? "Manual bail queued for native physics and animation." :
                 bail_issue ? bail_issue : "Manual bail could not be queued; keep the game focused and try again.";
             logging::log(accepted ? logging::Level::info : logging::Level::warning,logging::Channel::skater,"{}",s.published.bail_status);
@@ -1087,7 +1120,10 @@ void observe_selection(std::uintptr_t selector, std::uint32_t next) noexcept {
     if (!selector || selector != s.selector.load(std::memory_order_acquire)) return;
     try {
         std::lock_guard lock(s.mutex);
-        if (selector == s.watch.owner.selector && GetTickCount64() < s.watch.until && next == 300) s.bail_latched = true;
+        if (selector == s.watch.owner.selector && GetTickCount64() < s.watch.until && next == 300) {
+            s.bail_latched = true;
+            s.manual_bail_origin=GetTickCount64()<s.explicit_bail_until;
+        }
     } catch (...) {}
 }
 void observe_manual_bail(std::uintptr_t selector) noexcept {
@@ -1097,6 +1133,7 @@ void observe_manual_bail(std::uintptr_t selector) noexcept {
         std::lock_guard lock(s.mutex);
         if (selector==s.watch.owner.selector && GetTickCount64()<s.watch.until) {
             s.bail_latched=true;
+            s.manual_bail_origin=true;
             s.manual_bail_at=GetTickCount64();
         }
     } catch (...) {}
@@ -1122,6 +1159,7 @@ void observe_skeleton(std::uintptr_t rig, float seconds, bool wipeout) noexcept 
         if (!wipeout && ((selected >= 100 && selected < 300) || (selected >= 400 && selected < 500))) s.bail_latched = false;
         if (!wipeout && s.bail_latched && GetTickCount64()-s.manual_bail_at>750 &&
             local_bail_recovered(current)) s.bail_latched=false;
+        if (!s.bail_latched) s.manual_bail_origin=false;
         Frame frame;
         (void)capture(current, seconds, s.bail_latched, frame, s.published);
         ++s.published.samples;

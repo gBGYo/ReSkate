@@ -182,9 +182,9 @@ SkeletonRig read_skeleton_rig(const ebx::Document& document) {
         const auto known=region_for_joint(static_cast<int>(i));
         result.regions[i]=known ? *known : result.regions[static_cast<std::size_t>(parent)];
     }
-    for (const auto& [index,name] : std::array<std::pair<std::size_t,std::string_view>,8>{{
+    for (const auto& [index,name] : std::array<std::pair<std::size_t,std::string_view>,10>{{
         {0,"Reference"},{1,"AITrajectory"},{7,"Hips"},{103,"Head"},{49,"RightHand"},{278,"LeftHand"},
-        {10,"RightFoot"},{343,"LeftFoot"}}})
+        {10,"RightFoot"},{343,"LeftFoot"},{101,"Neck"},{102,"Neck1"}}})
         require(as<std::string>(names[index])==name,"Player render rig bone names changed");
     return result;
 }
@@ -219,12 +219,12 @@ SkeletonMesh read_skinned_mesh(std::span<const std::byte> resource,std::span<con
     for (std::size_t i=0;i<render_bone_count;++i) {
         require(result.rig.parents[i]>=-1 && result.rig.parents[i]<static_cast<int>(i),"Dem Bones rig hierarchy is invalid");
         require(static_cast<std::size_t>(result.rig.regions[i])<region_count,"Dem Bones rig injury region is invalid");
-        // Native contacts cover the main body bones, rather than fingers or
-        // corrective joints. Their mesh descendants share the same injury.
-        // Head geometry follows Neck1's physical head/neck body.
-        const auto known=region_for_joint(static_cast<int>(i));
-        result.rig.physics_parts[i]=i==103 ? 102u : known && i!=0 && i!=1 && i!=380 ? static_cast<unsigned>(i) :
-            result.rig.parents[i]>=0 ? result.rig.physics_parts[static_cast<std::size_t>(result.rig.parents[i])] :
+        // Resolve anatomical damage zones separately from skinning. Unreported
+        // fingers/correctives inherit their hand/limb; skull and neck have
+        // explicit mappings independent of the physics attachment joint.
+        const auto known=injury_joint_for_mesh(static_cast<int>(i));
+        result.rig.injury_parts[i]=known ? static_cast<unsigned>(*known) :
+            result.rig.parents[i]>=0 ? result.rig.injury_parts[static_cast<std::size_t>(result.rig.parents[i])] :
             static_cast<unsigned>(injury_bone_count);
     }
     for (unsigned section=0;section<layout.section_count;++section) {
@@ -282,7 +282,7 @@ SkeletonMesh read_skinned_mesh(std::span<const std::byte> resource,std::span<con
             }
             require(total==255,"Dem Bones skinning weights are not normalized");
             vertex.region=static_cast<std::uint32_t>(result.rig.regions[vertex.bones[dominant]]);
-            vertex.part=result.rig.physics_parts[vertex.bones[dominant]];
+            vertex.part=result.rig.injury_parts[vertex.bones[dominant]];
             result.vertices.push_back(vertex);
         }
         const auto index_offset=std::size_t{start}*2, index_bytes=std::size_t{triangles}*6;

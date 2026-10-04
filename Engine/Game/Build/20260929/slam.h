@@ -5,7 +5,11 @@ namespace dingosdk::game::build::v20260929::slam {
 // Read-only contracts, supported SHA-256 fbce74d5e28ef525dbba2cb4adbebc13405bdbd88f31bc940bca45e4ae88b8f9.
 // Contact producer clears 24 flags at reporter+340 and rebuilds them from
 // accepted external collisions. Detailed normal records start at +5e0,
-// stride 70. Rig physics +1040 owns the reporter.
+// stride 70. Rig physics +1040 owns the reporter. 4773936/477396f write
+// relative normal-speed magnitudes at record+54/+50; 477393f/4773978 write
+// their corresponding normals at +10/+00. Both branches write the contact
+// world position at +40 (4773968/4773994). +20/+30 are cross products of
+// normal and relative velocity, not contact positions or angular velocities.
 inline constexpr Fingerprint contacts{0x4772d70, {
     0x48,0x8b,0xc4,0x57,0x48,0x81,0xec,0x60,0x02,0x00,0x00,0xc5,0xf8,0x10,0x62,0x40,
     0xc5,0x78,0x29,0x40,0x98,0xc5,0x78,0x29,0x48,0x88,0x48,0x89,0x58,0xf0,0x48,0x8b}};
@@ -26,6 +30,22 @@ inline constexpr std::uintptr_t pose_output = 0x4638, physics = 0x2f10;
 inline constexpr std::uintptr_t reporter = 0x1040, contact_flags = 0x340;
 inline constexpr std::uintptr_t normals = 0x5e0, normal_stride = 0x70;
 inline constexpr std::uintptr_t body_stride = 0x130, velocity = 0x70;
+// Native getter copies the world rigid-body matrix at parts+slot*130+20.
+// Translation is +50. The following +80 lanes are not verified angular data.
+inline constexpr Fingerprint body_transform{0x47c8590, {
+    0x49,0x63,0xc0,0x4c,0x69,0xc0,0x30,0x01,0x00,0x00,0x48,0x8b,0x41,0x20,0xc4,0xc1,
+    0x7c,0x10,0x44,0x00,0x20,0xc4,0xc1,0x7c,0x10,0x4c,0x00,0x40,0xc5,0xfc,0x11,0x02}};
+inline constexpr std::uintptr_t body_pose=0x20;
+// Follow-state post-update computes incoming normal speed from context+4f0
+// and -context+4b0, and records cause 6 when
+// above the native hard-landing threshold (call 47779fa). Boneless uses the
+// same cause at 47778e6. Cause flags are bytes +28, magnitudes floats +4c.
+// Live on-board drops: physics 201, upward +4b0 normal, cause 6 ~20m/s,
+// board downward velocity ~20m/s -> zero, no foot-body contact at bail entry.
+inline constexpr Fingerprint hard_landing{0x4777940, {
+    0x40,0x53,0x48,0x83,0xec,0x60,0xc5,0xf8,0x29,0x74,0x24,0x50,0xc5,0xf8,0x29,0x7c,
+    0x24,0x40,0x48,0x8b,0xd9,0x48,0x8b,0x49,0x20,0xc5,0x78,0x29,0x44,0x24,0x30,0xc5}};
+inline constexpr std::uintptr_t owned_board_vtable=0x65e67a0;
 // Final skinned draw packet export: packs instance+e8 into +e0 on demand,
 // applying world placement (48d7990/48d2a30). Observe after return and read
 // output+128 packed bones, +136 count, +144 extracted root, +152 relative

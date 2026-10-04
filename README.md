@@ -128,11 +128,35 @@ The same visibility settings apply; **During attempts** becomes **Always** in no
 Choose **Always** and disable **Only impacted bones** for a continuously visible full skeleton, or
 choose **After impacts** with **Only impacted bones** for repeatable impact effects. The toggle is saved.
 Normal-play X-ray works with No Bail enabled; Noclip, Park Editor, loading and online play pause it.
-Enable **Only impacted bones** to hide untouched parts and reveal the body bones involved in scored
+Enable **Only impacted bones** to hide untouched parts and reveal the body bones involved in detected
 contacts. A forearm hit reveals the forearm separately from the hand or upper arm. Fingers follow their
-hand collider, and the skull follows the native head/neck collider; the game does not report individual
-finger or skull-bone contacts. Injuries and fractures are tracked per physical bone for the visual,
-while challenge scoring and fracture bonuses remain grouped into six body regions.
+hand collider. The native head-region bodies attach to Neck (101) and Neck1 (102); the latter now
+highlights the skull (Head, 103), while both rendered neck joints follow the neck body. This explicit
+anatomical attribution uses the captured body map and the installed render skeleton; the game does
+not report individual finger or skull-bone contacts. Injuries and fractures update per body independently
+of the 250ms region scoring cooldown, so rapid neck-to-head or forearm-to-hand hits reveal both parts.
+Challenge scoring and fracture bonuses remain grouped into six body regions. A held contact can injure
+once until observed separation, avoiding repeated damage from resting solver or animation changes.
+
+Detection selects the stronger of the native record's two contact normals. It requires at least 2m/s
+approach and 3m/s normal velocity change, with gravity removed. At an observed contact onset, the
+native record's relative normal speed of at least 3m/s can also preserve an impact already slowed by
+physics or animation. Confirmed body impacts while upright are retained for up to 200ms of simulation
+time and applied only when a natural bail follows. Ordinary landings remain undamaged; manual bails,
+missing telemetry, changed body identities and teleports cannot replay retained impacts. A ridden-board
+landing can bruise both feet when native hard-landing cause 6 coincides with an upward support normal
+and normal velocity loss on the same owned board, and a natural bail follows. Its arcade severity is
+shared equally between the two feet. Loose-board collisions, ordinary landings, wall contacts and
+board velocity changes without the native hard-landing cause cannot establish transmitted foot damage.
+When three consecutive rigid-body
+poses and one attributable world contact point are available, rotation supplements linear velocity
+using the estimated velocity at that point. Missing poses, gaps, ambiguous two-direction points,
+turns over 60 degrees per sample or remote points retain the linear path. Native angular-velocity and
+impulse fields remain unverified. Brief contacts between samples, strikes without sufficient measured
+deceleration and renewed hits without an observed separation can still be missed. These changes pass
+automated regressions and installed-asset checks. In-game checks confirm skull impacts and damage to
+both feet on hard skateboard landings that cause a bail, with upright landings remaining undamaged.
+Rotating limb falls still need targeted in-game validation on the supported build.
 Impact flashes affect the injured bones and fade once; they do not flash the whole screen. The mesh
 adds a short bright hit pulse and optional persistent jagged fracture marks anchored to each bone's
 geometry. A fresh fracture briefly opens the split before it settles; further contacts with that bone

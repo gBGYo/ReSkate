@@ -84,20 +84,25 @@ std::optional<VisualOptions> decode_visual_options(std::string_view text) noexce
 void VisualEvents::observe(const Result& result,std::uint64_t now) noexcept {
     if (result.cancelled || result.phase==Phase::ready) {reset(); return;}
     if (result.impacts<observed_impacts) reset();
-    if (result.impacts>observed_impacts) {
-        latest_severity=0; latest_fracture=false;
-        for (std::size_t i=0;i<injury_bone_count;++i) {
-            const auto change=result.bone_injuries[i].severity-severity[i];
-            if (change>0) {
-                impacts_at_ms[i]=now;
-                const bool broke=result.bone_injuries[i].fractured && !fractured[i];
-                if (broke) fractures_at_ms[i]=now;
-                if ((broke && !latest_fracture) || (broke==latest_fracture && change>latest_severity)) {
-                    latest_bone=static_cast<unsigned>(i); latest_severity=change; latest_fracture=broke;
-                }
+    // Bone injuries also change during a region's score cooldown. Observe
+    // their deltas directly instead of using the scored-impact counter.
+    float newest_severity{};
+    bool newest_fracture{},changed{};
+    unsigned newest_bone{};
+    for (std::size_t i=0;i<injury_bone_count;++i) {
+        const auto change=result.bone_injuries[i].severity-severity[i];
+        if (change>0) {
+            changed=true; impacts_at_ms[i]=now;
+            const bool broke=result.bone_injuries[i].fractured && !fractured[i];
+            if (broke) fractures_at_ms[i]=now;
+            if ((broke && !newest_fracture) || (broke==newest_fracture && change>newest_severity)) {
+                newest_bone=static_cast<unsigned>(i); newest_severity=change; newest_fracture=broke;
             }
         }
-        latest_impact_ms=now;
+    }
+    if (changed) {
+        latest_impact_ms=now; latest_bone=newest_bone;
+        latest_severity=newest_severity; latest_fracture=newest_fracture;
     }
     observed_impacts=result.impacts;
     for (std::size_t i=0;i<injury_bone_count;++i) {

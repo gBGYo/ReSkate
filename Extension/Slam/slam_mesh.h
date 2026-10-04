@@ -20,7 +20,7 @@ struct SkeletonRig {
     std::array<int,render_bone_count> parents{};
     std::array<PoseMatrix,render_bone_count> inverse_bind{};
     std::array<Region,render_bone_count> regions{};
-    std::array<unsigned,render_bone_count> physics_parts{};
+    std::array<unsigned,render_bone_count> injury_parts{};
 };
 struct SkeletonMesh {
     SkeletonRig rig;

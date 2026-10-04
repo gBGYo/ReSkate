@@ -1,6 +1,7 @@
 #include "slam_model.h"
 #include <algorithm>
 #include <cmath>
+#include <optional>
 #include <utility>
 
 namespace dingosdk::slam {
@@ -9,14 +10,53 @@ float length(const Vec3& v) { return std::sqrt(v[0]*v[0] + v[1]*v[1] + v[2]*v[2]
 bool finite(const Vec3& v) {
     return std::all_of(v.begin(), v.end(), [](float x) { return std::isfinite(x) && std::abs(x) < 1000000; });
 }
+Vec3 cross(const Vec3& a,const Vec3& b) {
+    return {a[1]*b[2]-a[2]*b[1],a[2]*b[0]-a[0]*b[2],a[0]*b[1]-a[1]*b[0]};
+}
+float dot(const Vec3& a,const Vec3& b) {return a[0]*b[0]+a[1]*b[1]+a[2]*b[2];}
+bool rigid_pose(const std::array<float,16>& pose) {
+    const Vec3 x{pose[0],pose[1],pose[2]},y{pose[4],pose[5],pose[6]},z{pose[8],pose[9],pose[10]};
+    return finite(x) && finite(y) && finite(z) && finite({pose[12],pose[13],pose[14]}) &&
+        std::abs(dot(x,x)-1)<.05f && std::abs(dot(y,y)-1)<.05f && std::abs(dot(z,z)-1)<.05f &&
+        std::abs(dot(x,y))<.05f && std::abs(dot(x,z))<.05f && std::abs(dot(y,z))<.05f && dot(cross(x,y),z)>.95f;
+}
+std::optional<Vec3> angular_velocity(const Body& before,const Body& body,float dt) {
+    if (!before.pose_valid || !body.pose_valid || !rigid_pose(before.pose) || !rigid_pose(body.pose)) return {};
+    Vec3 angular{};
+    float trace{};
+    for (std::size_t offset : {0u,4u,8u}) {
+        const Vec3 a{before.pose[offset],before.pose[offset+1],before.pose[offset+2]};
+        const Vec3 b{body.pose[offset],body.pose[offset+1],body.pose[offset+2]};
+        const auto product=cross(a,b);
+        for (std::size_t axis=0;axis<3;++axis) angular[axis]+=product[axis]/(2*dt);
+        trace+=dot(a,b);
+    }
+    // sum(cross(old_axis,new_axis))/2dt estimates world angular velocity.
+    // Large intersample turns are ambiguous: use linear telemetry instead.
+    return trace>=2.f && finite(angular) && length(angular)<=100 ? std::optional(angular) : std::nullopt;
+}
+std::optional<Vec3> velocity_at_contact(const Body& body,const Vec3& angular,const Vec3& point) {
+    Vec3 lever{};
+    for (std::size_t axis=0;axis<3;++axis) lever[axis]=point[axis]-body.pose[12+axis];
+    if (!finite(lever) || length(lever)>1.5f) return {};
+    auto velocity=cross(angular,lever);
+    for (std::size_t axis=0;axis<3;++axis) velocity[axis]+=body.velocity[axis];
+    return finite(velocity) && length(velocity)<=300 ? std::optional(velocity) : std::nullopt;
+}
 bool usable(const Frame& frame) {
     if (!frame.valid || !frame.entity || !frame.world || !finite(frame.center) ||
         !frame.body_count || frame.body_count > max_bodies) return false;
+    if (frame.board.identity && (!finite(frame.board.velocity) || length(frame.board.velocity)>300)) return false;
+    if (frame.board.hard_landing && (!frame.board.identity || !finite(frame.board.normal) ||
+        length(frame.board.normal)<.5f || length(frame.board.normal)>1.5f ||
+        !std::isfinite(frame.board.speed) || frame.board.speed<0 || frame.board.speed>300)) return false;
     for (std::size_t i = 0; i < frame.body_count; ++i) {
         const auto& body = frame.bodies[i];
         if (body.region >= Region::count || body.joint< -1 || body.joint>=static_cast<int>(injury_bone_count) ||
+            body.injury_joint< -1 || body.injury_joint>=static_cast<int>(injury_bone_count) ||
             !finite(body.velocity) || length(body.velocity) > 300 ||
-            (body.contact && (!finite(body.normal) || length(body.normal) < .5f || length(body.normal) > 1.5f)))
+            (body.speed_valid && (!std::isfinite(body.contact_speed) || body.contact_speed<0 || body.contact_speed>300)) ||
+            (body.contact && body.normal_valid && (!finite(body.normal) || length(body.normal) < .5f || length(body.normal) > 1.5f)))
             return false;
     }
     return true;
@@ -82,6 +122,7 @@ bool Challenge::begin(const Frame& frame, const Config& config) {
     result_.detail = "Take a fall. Hard impacts and different body regions score more.";
     previous_ = frame;
     previous_valid_ = true;
+    for (std::size_t i=0;i<frame.body_count;++i) contact_injured_[i]=frame.bodies[i].contact;
     peak_y_ = frame.center[1];
     return true;
 }
@@ -130,6 +171,7 @@ void Challenge::step(const Frame& frame) {
     if (!std::isfinite(frame.dt) || frame.dt <= 0 || frame.dt > .1f || !usable(frame)) {
         // Rebaseline after any gap: never score a delta across missing samples.
         previous_valid_ = false;
+        recent_impacts_={};
         // A contact chain requires observed continuity. Keep its historical
         // best, but do not carry its window or a settling timer across a gap.
         result_.current_chain = 0;
@@ -148,10 +190,38 @@ void Challenge::step(const Frame& frame) {
         result_.injuries[r].flash = std::max(0.f, result_.injuries[r].flash - frame.dt);
     }
     for (auto& injury : result_.bone_injuries) injury.flash=std::max(0.f,injury.flash-frame.dt);
+    for (std::size_t i=0;i<frame.body_count;++i) {
+        auto& recent=recent_impacts_[i];
+        recent.remaining=std::max(0.f,recent.remaining-frame.dt);
+        if (!recent.remaining) recent={};
+        if (recent.board && recent.board!=frame.board.identity) recent={};
+        if (!previous_valid_ || previous_.body_count!=frame.body_count) {
+            contact_injured_[i]=frame.bodies[i].contact;
+            recent={};
+        } else if (frame.bodies[i].joint!=previous_.bodies[i].joint ||
+            frame.bodies[i].injury_joint!=previous_.bodies[i].injury_joint || frame.bodies[i].region!=previous_.bodies[i].region) {
+            contact_injured_[i]=false;
+            recent={};
+        } else if (!frame.bodies[i].contact) contact_injured_[i]=false;
+    }
     result_.elapsed_s += frame.dt;
     Vec3 displacement{};
     float speed{};
     for (std::size_t i = 0; i < frame.body_count; ++i) speed = std::max(speed, length(frame.bodies[i].velocity));
+    std::array<Vec3,max_bodies> angular{};
+    std::array<bool,max_bodies> angular_valid{};
+    bool rotating{};
+    if (previous_valid_ && previous_.bailed && frame.bailed && previous_.body_count==frame.body_count) {
+        for (std::size_t i=0;i<frame.body_count;++i) {
+            const auto& body=frame.bodies[i];
+            const auto& before=previous_.bodies[i];
+            if (body.joint!=before.joint || body.injury_joint!=before.injury_joint) continue;
+            if (const auto estimate=angular_velocity(before,body,frame.dt)) {
+                angular[i]=*estimate; angular_valid[i]=true;
+                rotating=rotating || length(*estimate)>1.f;
+            }
+        }
+    }
     if (previous_valid_) {
         for (std::size_t i = 0; i < 3; ++i) displacement[i] = frame.center[i] - previous_.center[i];
         if (length(displacement) > std::max(2.f, speed * frame.dt * 3.f)) {
@@ -159,7 +229,84 @@ void Challenge::step(const Frame& frame) {
             return;
         }
     }
-    if (result_.phase == Phase::attempt && frame.bailed) {
+    const bool entering_bail=result_.phase==Phase::attempt && frame.bailed;
+    std::array<float,max_bodies> body_changes{};
+    // Native hard-landing evidence belongs to the ridden board, not the
+    // ragdoll feet. Share its arcade severity across both supporting feet.
+    // A loose board, wall hit or velocity change without native cause cannot
+    // transmit damage. Require continuous identity and an observed onset.
+    if (previous_valid_ && previous_.body_count==frame.body_count &&
+        result_.phase==Phase::attempt && !frame.manual_bail &&
+        previous_.board.riding && frame.board.identity==previous_.board.identity &&
+        frame.board.hard_landing && !previous_.board.hard_landing &&
+        (frame.board.riding || entering_bail)) {
+        const auto& board=frame.board;
+        const float n=length(board.normal);
+        float change{},approach{};
+        for (std::size_t axis=0;axis<3;++axis) {
+            const float normal=board.normal[axis]/n;
+            const float incoming=previous_.board.velocity[axis]-(axis==1 ? 9.81f*frame.dt : 0);
+            change+=(board.velocity[axis]-incoming)*normal;
+            approach-=incoming*normal;
+        }
+        if (board.normal[1]/n>.5f && approach>=2 && change>=3 && board.speed>=3) {
+            const float shared=std::min(change,board.speed)*.70710678f;
+            for (std::size_t i=0;i<frame.body_count;++i) {
+                const auto& body=frame.bodies[i];
+                const auto& before=previous_.bodies[i];
+                if ((body.joint!=10 && body.joint!=343) || body.joint!=before.joint ||
+                    body.injury_joint!=before.injury_joint || body.region!=before.region) continue;
+                if (!frame.bailed) {
+                    if (shared>recent_impacts_[i].change) recent_impacts_[i]={shared,.2f,board.identity};
+                } else body_changes[i]=shared;
+            }
+        }
+    }
+    if (previous_valid_ && previous_.body_count==frame.body_count &&
+        (result_.phase==Phase::attempt || result_.phase==Phase::bailed)) {
+        for (std::size_t i=0;i<frame.body_count;++i) {
+            const auto& body=frame.bodies[i];
+            const auto& before=previous_.bodies[i];
+            if (!body.contact || !body.normal_valid || contact_injured_[i] || body.region!=before.region ||
+                body.joint!=before.joint || body.injury_joint!=before.injury_joint) continue;
+            const float n=length(body.normal);
+            const auto impact_change=[&](const Vec3& incoming,const Vec3& outgoing) {
+                float change{},approaching{};
+                for (std::size_t axis=0;axis<3;++axis) {
+                    const float normal=body.normal[axis]/n;
+                    const float free_velocity=incoming[axis]-(axis==1 ? 9.81f*frame.dt : 0);
+                    change+=(outgoing[axis]-free_velocity)*normal;
+                    approaching-=free_velocity*normal;
+                }
+                return approaching>=2 && change>=3 ? change : 0.f;
+            };
+            float change=impact_change(before.velocity,body.velocity);
+            // The native collision record preserves relative normal speed
+            // even when response/animation has already slowed the body. Use
+            // it only at observed contact onset, never for a held contact.
+            if (!before.contact && body.speed_valid && body.contact_speed>=3)
+                change=std::max(change,body.contact_speed);
+            if (body.point_valid && finite(body.contact_point) && angular_valid[i] && previous_angular_valid_[i]) {
+                const auto incoming=velocity_at_contact(before,previous_angular_[i],body.contact_point);
+                const auto outgoing=velocity_at_contact(body,angular[i],body.contact_point);
+                if (incoming && outgoing) change=std::max(change,impact_change(*incoming,*outgoing));
+            }
+            if (change<=0) continue;
+            contact_injured_[i]=true;
+            if (result_.phase==Phase::attempt && !frame.bailed) {
+                if (change>recent_impacts_[i].change) recent_impacts_[i]={change,.2f};
+            }
+            else body_changes[i]=std::max(body_changes[i],change);
+        }
+    }
+    if (entering_bail) {
+        for (std::size_t i=0;i<frame.body_count;++i) {
+            if (!frame.manual_bail && recent_impacts_[i].remaining>0)
+                body_changes[i]=std::max(body_changes[i],recent_impacts_[i].change);
+            recent_impacts_[i]={};
+        }
+    }
+    if (entering_bail) {
         result_.phase = Phase::bailed;
         result_.detail = "Keep tumbling!";
     }
@@ -183,29 +330,32 @@ void Challenge::step(const Frame& frame) {
         // velocity. It is not a claim of physical energy or real bone damage.
         std::array<float, region_count> severity{};
         std::array<float, injury_bone_count> bone_severity{};
+        std::array<float, injury_bone_count> bone_threshold{};
         if (previous_valid_ && previous_.body_count == frame.body_count) {
             for (std::size_t i = 0; i < frame.body_count; ++i) {
                 const auto& body = frame.bodies[i];
-                const auto& before = previous_.bodies[i];
-                if (!body.contact || body.region != before.region) continue;
-                const float n = length(body.normal);
-                float change{}, approaching{};
-                for (std::size_t axis = 0; axis < 3; ++axis) {
-                    const float normal = body.normal[axis] / n;
-                    // Remove gravity so a free fall cannot look like an impact.
-                    const float free_velocity = before.velocity[axis] - (axis == 1 ? 9.81f * frame.dt : 0);
-                    change += (body.velocity[axis] - free_velocity) * normal;
-                    approaching -= free_velocity * normal;
-                }
-                if (approaching < 2 || change < 3) continue;
+                const float change=body_changes[i];
+                if (change<=0) continue;
+                contact_injured_[i]=true;
                 const auto region = static_cast<std::size_t>(body.region);
                 const float hit=std::min(change, 60.f)*std::min(change, 60.f);
                 severity[region] = std::max(severity[region], hit);
-                if (body.joint>=0) {
-                    const auto bone=static_cast<std::size_t>(body.joint);
+                const int injury_joint=body.injury_joint>=0 ? body.injury_joint : body.joint;
+                if (injury_joint>=0) {
+                    const auto bone=static_cast<std::size_t>(injury_joint);
                     bone_severity[bone]=std::max(bone_severity[bone],hit);
+                    const auto& rules=result_.config.scoring;
+                    bone_threshold[bone]=body.region==Region::head ? rules.head_fracture : rules.limb_fracture;
                 }
             }
+        }
+        // Injury feedback follows every observed body impact, independently of
+        // whether its region is eligible to award points in this sample.
+        for (std::size_t bone=0;bone<bone_severity.size();++bone) {
+            if (bone_severity[bone]<=0) continue;
+            auto& injury=result_.bone_injuries[bone];
+            injury.severity+=bone_severity[bone]; injury.flash=.65f;
+            injury.fractured=injury.severity>=bone_threshold[bone];
         }
         for (std::size_t r = 0; r < region_count; ++r) {
             if (severity[r] <= 0 || cooldown_[r] > 0) continue;
@@ -224,23 +374,13 @@ void Challenge::step(const Frame& frame) {
             const float multiplier = std::min(3.f, static_cast<float>(result_.current_chain-1)*rules.chain_step);
             result_.chain_points += static_cast<std::uint64_t>(std::llround(static_cast<double>(base_points)*multiplier));
             const float threshold = r == static_cast<std::size_t>(Region::head) ? rules.head_fracture : rules.limb_fracture;
-            for (std::size_t i=0;i<frame.body_count;++i) {
-                const auto& body=frame.bodies[i];
-                if (body.region!=static_cast<Region>(r) || body.joint<0) continue;
-                const auto bone=static_cast<std::size_t>(body.joint);
-                if (bone_severity[bone]<=0) continue;
-                auto& bone_injury=result_.bone_injuries[bone];
-                bone_injury.severity+=bone_severity[bone]; bone_injury.flash=.65f;
-                bone_injury.fractured=bone_injury.severity>=threshold;
-                bone_severity[bone]=0; // Repeated body mappings cannot double-count a bone.
-            }
             if (!injury.fractured && injury.severity >= threshold) {
                 injury.fractured = true;
                 ++result_.fractures;
                 result_.fracture_points += static_cast<std::uint64_t>(std::llround(rules.fracture_bonus));
             }
         }
-        still_ = frame.grounded && speed < .65f ? still_ + frame.dt : 0;
+        still_ = frame.grounded && speed < .65f && !rotating ? still_ + frame.dt : 0;
         if (still_ >= .8f || bailed_time_ >= 15) {
             result_.phase = Phase::settled;
             result_.detail = "Attempt complete.";
@@ -253,6 +393,8 @@ void Challenge::step(const Frame& frame) {
         update_score();
         previous_ = frame;
         previous_valid_ = true;
+        previous_angular_=angular;
+        previous_angular_valid_=angular_valid;
     }
 }
 }

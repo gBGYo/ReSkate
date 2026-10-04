@@ -44,7 +44,20 @@ int main(int argc, char** argv) {
             const auto mesh=dingosdk::slam::load_dembones_mesh(argv[1]);
             std::cout << "Dem Bones: " << mesh.vertices.size() << " vertices, " << mesh.indices.size()/3
                 << " triangles, " << std::count(mesh.required.begin(),mesh.required.end(),true) << " required bones.\n";
+            std::array<std::size_t,dingosdk::slam::injury_bone_count> injury_vertices{};
+            for (const auto& vertex : mesh.vertices) {
+                if (vertex.part>=injury_vertices.size())
+                    throw std::runtime_error("Mesh vertex has no valid anatomical injury mapping");
+                ++injury_vertices[static_cast<std::size_t>(vertex.part)];
+            }
+            if (!injury_vertices[101] || !injury_vertices[103] || injury_vertices[102] ||
+                mesh.rig.injury_parts[101]!=101 || mesh.rig.injury_parts[102]!=101 || mesh.rig.injury_parts[103]!=103)
+                throw std::runtime_error("Head and neck anatomical injury zones are not distinct");
+            Json mapping=Json::object();
+            for (std::size_t i=0;i<injury_vertices.size();++i)
+                if (injury_vertices[i]) mapping[std::to_string(i)]=injury_vertices[i];
             std::filesystem::create_directories(argv[2]);
+            std::ofstream(std::filesystem::path(argv[2])/"dembones-injury-vertices.json") << mapping.dump(2);
             // A reviewable, local-only mesh preview; the runtime loads the
             // installed assets and does not depend on this exported evidence.
             std::ofstream file(std::filesystem::path(argv[2])/"dembones-preview.obj");

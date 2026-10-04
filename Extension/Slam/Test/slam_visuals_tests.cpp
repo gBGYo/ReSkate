@@ -101,9 +101,17 @@ void impact_feedback() {
     ++result.impacts; result.bone_injuries[277].severity+=10; events.observe(result,1250);
     check(events.fractures_at_ms[277]==1200 && !events.latest_fracture,
         "Repeated contact with a broken bone cannot restart the fracture opening");
+    result.bone_injuries[278]={260,0,true}; events.observe(result,1270);
+    check(events.latest_bone==278 && events.latest_fracture && events.latest_impact_ms==1270 &&
+        events.impacts_at_ms[278]==1270 && events.fractures_at_ms[278]==1270 &&
+        visual_appearance(options,result,events,1270,false).damage[278][1]>0,
+        "An injury without another scored impact gets its own flash, fracture time and sound event");
+    events.observe(result,1290);
+    check(events.latest_impact_ms==1270 && events.fractures_at_ms[278]==1270,
+        "Publishing an unchanged injury does not restart contact feedback");
     const auto recorded=events;
-    events.observe(result,1260);
-    check(events.latest_impact_ms==recorded.latest_impact_ms && events.latest_severity==10,
+    events.observe(result,1300);
+    check(events.latest_impact_ms==recorded.latest_impact_ms && events.latest_severity==recorded.latest_severity,
         "Republishing an unchanged impact does not retrigger sound or flash timing");
     const auto late=visual_appearance(options,result,events,1600,false);
     check(late.damage[277][0]==1 && late.damage[277][1]==0 && late.damage[277][3]==0,"Fracture marks remain after the short hit pulse and fracture opening expire");
@@ -127,6 +135,27 @@ void impact_feedback() {
     }
     options.sound_volume=std::numeric_limits<float>::infinity();
     check(!valid_visual_options(options),"Non-finite sound gain cannot reach playback");
+}
+void delayed_bail_feedback() {
+    for (unsigned scenario=0;scenario<3;++scenario) {
+        FreeplayXray xray;
+        Frame frame; frame.valid=true; frame.entity=11; frame.world=22; frame.dt=.02f;
+        frame.center={0,10,0}; frame.body_count=1;
+        auto& head=frame.bodies[0]; head.region=Region::head; head.joint=102; head.injury_joint=103;
+        head.velocity={0,-18,0};
+        xray.step(frame,1000);
+        head.contact=true; head.normal={0,1,0}; head.velocity={};
+        xray.step(frame,1020);
+        check(!xray.result().impacts && !xray.events().latest_impact_ms,
+            "Upright impacts do not reveal injuries or trigger feedback before a bail");
+        if (scenario==2) for (unsigned i=0;i<12;++i) xray.step(frame,1040+i*20);
+        frame.bailed=true; frame.manual_bail=scenario==1;
+        xray.step(frame,1300);
+        check((xray.result().bone_injuries[103].severity>0)==(scenario==0),
+            "Standalone X-ray attributes only recent contacts preceding a natural bail");
+        check((xray.events().latest_bone==103 && xray.events().latest_impact_ms==1300)==(scenario==0),
+            "Delayed skull damage starts feedback when the bail confirms the injury");
+    }
 }
 void time_scale_ownership() {
     using dingosdk::FloatSettingSample;
@@ -272,7 +301,7 @@ void impact_camera_timing() {
     check(!pulse.step(options,event,2300,true).started_ms,"Minor contacts cannot shake the normal skating camera");
 }
 int main() {
-    saved_options(); visibility_and_flashes(); normal_play_falls(); impact_feedback(); time_scale_ownership(); slow_motion_envelope(); impact_camera_timing();
+    saved_options(); visibility_and_flashes(); normal_play_falls(); impact_feedback(); delayed_bail_feedback(); time_scale_ownership(); slow_motion_envelope(); impact_camera_timing();
     if (failures) return 1;
     std::cout<<"Slam visual timing, accessibility and saved-options checks passed.\n";
 }

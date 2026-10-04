@@ -39,6 +39,28 @@ struct Body {
     Vec3 velocity{}, normal{};
     bool contact{};
     int joint = -1;
+    // Physical joint identity and displayed anatomy are distinct. The native
+    // head body is attached to Neck1 (102), but injures the skull (103).
+    int injury_joint = -1;
+    bool normal_valid = true;
+    // Optional world-space rigid-body pose and a verified contact point.
+    // Rotation is derived from consecutive poses; no native angular field is
+    // guessed. Missing/ambiguous point detail keeps the linear estimate.
+    std::array<float,16> pose{};
+    Vec3 contact_point{};
+    bool pose_valid{}, point_valid{};
+    // Contact producer's relative normal speed, captured before animation
+    // correction can erase the body's incoming linear velocity.
+    float contact_speed{};
+    bool speed_valid{};
+};
+// Owned board sample. A hard landing requires native cause 6, an upward
+// support normal and a matching normal velocity loss; speed alone is insufficient.
+struct BoardLanding {
+    std::uint64_t identity{};
+    Vec3 velocity{}, normal{};
+    float speed{};
+    bool riding{}, hard_landing{};
 };
 struct Frame {
     std::uint64_t entity{}, world{};
@@ -46,7 +68,8 @@ struct Frame {
     Vec3 center{};
     std::array<Body, max_bodies> bodies{};
     std::size_t body_count{};
-    bool valid{}, bailed{}, grounded{};
+    bool valid{}, bailed{}, grounded{}, manual_bail{};
+    BoardLanding board;
 };
 struct Injury {
     float severity{}, flash{};
@@ -82,6 +105,13 @@ private:
     Result result_;
     Frame previous_;
     std::array<float, region_count> cooldown_{};
+    // A held contact can injure each body once. Scoring cooldowns are regional;
+    // they must never suppress a different body's injury in the same region.
+    std::array<bool, max_bodies> contact_injured_{};
+    struct RecentImpact {float change{}, remaining{}; std::uint64_t board{};};
+    std::array<RecentImpact,max_bodies> recent_impacts_{};
+    std::array<Vec3, max_bodies> previous_angular_{};
+    std::array<bool, max_bodies> previous_angular_valid_{};
     float airborne_{}, peak_y_{}, still_{}, settled_{}, bailed_time_{}, missing_time_{};
     bool previous_valid_{};
 };

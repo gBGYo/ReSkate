@@ -165,6 +165,11 @@ void native_regressions() {
     for (std::size_t i=0; i<live_map.size(); ++i)
         check(region_for_joint(live_map[i]) == expected[i], "The captured body map preserves left/right anatomy");
     check(!region_for_joint(10000), "An unknown joint cannot receive a guessed injury region");
+    check(injury_joint_for_body(102)==103 && injury_joint_for_body(101)==101 &&
+        injury_joint_for_mesh(103)==103 && injury_joint_for_mesh(102)==101 && injury_joint_for_mesh(101)==101,
+        "The native Neck1 head proxy damages the skull, while both neck mesh joints follow the neck proxy");
+    check(!injury_joint_for_body(380) && !injury_joint_for_body(10000) && !injury_joint_for_mesh(0),
+        "Dummy and unknown joints cannot be assigned an anatomical injury");
     std::array<float,16> actor{0,0,-1,0, 0,1,0,0, 1,0,0,0, -56,1,-18,1};
     check(model_to_world(actor, {1,2,3}) == Vec3{-53,3,-19}, "Projected bones include actor rotation and placement");
     const auto before = model_to_world(actor, {0,-.1f,0});
@@ -456,8 +461,9 @@ void mesh_streams() {
     check(mesh.vertices.size()==15 && mesh.indices.size()==15,"All five body sections decode with their own stream bases");
     check(mesh.vertices[1].bones[0]==103 && mesh.vertices[1].region==static_cast<unsigned>(Region::head),
         "The section bone palette maps skinning indices to player bones and injury regions");
-    check(mesh.vertices[1].part==102 && mesh.vertices[0].part==7,
-        "Head and pelvis mesh vertices map to the matching native contact bodies");
+    check(mesh.vertices[1].part==103 && mesh.vertices[0].part==7 && mesh.rig.injury_parts[101]==101 &&
+        mesh.rig.injury_parts[102]==101,
+        "Skull and neck mesh surfaces have distinct anatomical injury zones, independent of physics attachment IDs");
     check(mesh.vertices[2].weights[0]==128 && mesh.vertices[2].weights[4]==127 && mesh.vertices[2].bones[4]==103,
         "Both sets of four bone weights decode from separate streams");
     check(mesh.indices[3]==3 && mesh.indices.back()==14 && mesh.required[0] && mesh.required[7] && mesh.required[103],
@@ -486,7 +492,8 @@ void individual_bone_hits() {
     check(forearm.severity>0 && c.result().bone_injuries[278].severity==0,
         "A forearm contact cannot mark an untouched hand as impacted");
     f.bodies[1].contact=true; f.bodies[1].normal={0,1,0}; f.bodies[1].velocity={}; c.step(f);
-    check(c.result().bone_injuries[278].severity==0,"The region contact cooldown also gates new bone effects");
+    check(c.result().bone_injuries[278].severity>0 && c.result().impacts==1,
+        "A hand hit within the forearm's region cooldown updates its injury without another scored impact");
     f.bodies[0].contact=f.bodies[1].contact=false;
     for (int i=0;i<15;++i) c.step(f);
     fall(f,c,20); hit(f,c,1);
@@ -496,6 +503,214 @@ void individual_bone_hits() {
         "Retry clears every tracked bone injury");
     f=skater(); f.bodies[0].joint=static_cast<int>(injury_bone_count);
     check(!c.begin(f),"Out-of-range native bone mappings cannot index injury storage");
+}
+void rapid_head_hits_and_contact_episodes() {
+    Challenge c; auto f=skater();
+    f.bodies[0].joint=101; f.bodies[0].injury_joint=*injury_joint_for_body(101);
+    f.bodies[1].joint=102; f.bodies[1].injury_joint=*injury_joint_for_body(102);
+    f.bodies[1].region=Region::head;
+    c.begin(f); fall(f,c,20); hit(f,c,0);
+    const auto points=c.result().impact_points;
+    const auto chain=c.result().current_chain;
+    hit(f,c,1);
+    check(c.result().bone_injuries[101].fractured && c.result().bone_injuries[103].fractured &&
+        c.result().bone_injuries[102].severity==0,
+        "A neck-then-head collision within 20ms fractures both distinct anatomical zones");
+    check(c.result().impacts==1 && c.result().impact_points==points && c.result().current_chain==chain &&
+        c.result().fractures==1,
+        "Injuries during score cooldown cannot duplicate region points, chains or fracture bonuses");
+    const auto skull=c.result().bone_injuries[103].severity;
+    f.grounded=false;
+    for (int i=0;i<20;++i) {
+        f.bodies[1].velocity=i%2 ? Vec3{} : Vec3{0,-20,0};
+        c.step(f);
+    }
+    check(c.result().bone_injuries[103].severity==skull && c.result().impacts==1,
+        "A held contact cannot repeat injury or score when solver/animation velocities change after cooldown");
+    f.bodies[1].normal_valid=false; f.bodies[1].velocity={0,-20,0}; c.step(f);
+    f.bodies[1].normal_valid=true; f.bodies[1].velocity={}; c.step(f);
+    check(c.result().bone_injuries[103].severity==skull,
+        "Missing detailed normals cannot release and rearm a raw held contact");
+    fall(f,c,20); hit(f,c,1);
+    check(c.result().bone_injuries[103].severity>skull && c.result().impacts==2,
+        "A genuinely separated and renewed head contact starts another injury episode");
+
+    c.begin(skater()); f=skater();
+    f.bodies[0].joint=101; f.bodies[1].joint=102; f.bodies[1].region=Region::head;
+    f.bodies[1].injury_joint=103; c.begin(f); fall(f,c,20);
+    f.bailed=true; f.bodies[0].contact=f.bodies[1].contact=true;
+    f.bodies[0].normal=f.bodies[1].normal={0,1,0};
+    f.bodies[0].velocity=f.bodies[1].velocity={}; c.step(f);
+    check(c.result().impacts==1 && c.result().bone_injuries[101].severity>0 &&
+        c.result().bone_injuries[103].severity>0,
+        "Simultaneous head and neck contacts injure both zones while scoring the region once");
+
+    f.bodies[0].contact=f.bodies[1].contact=false; c.step(f);
+    const auto before_gap=c.result().bone_injuries[103].severity;
+    f.valid=false; c.step(f); f.valid=true; f.bodies[1].contact=true;
+    f.bodies[1].velocity={0,-20,0}; c.step(f); f.bodies[1].velocity={}; c.step(f);
+    const auto after_gap=c.result().bone_injuries[103].severity;
+    check(after_gap==before_gap && c.result().impacts==1,
+        "A contact already present on rebaseline cannot become a delayed scored hit");
+    f=skater(); f.bodies[0].injury_joint=static_cast<int>(injury_bone_count);
+    check(!c.begin(f),"Out-of-range anatomical mappings cannot index injury storage");
+}
+void contact_record_selection() {
+    std::array<unsigned char,0x70> record{};
+    const auto write=[&](std::size_t offset,const auto& value) {
+        std::memcpy(record.data()+offset,&value,sizeof(value));
+    };
+    write(0,Vec3{1,0,0}); write(0x10,Vec3{0,1,0});
+    write(0x40,Vec3{10,20,30}); write(0x50,1.f); write(0x54,20.f);
+    const auto second=decode_contact_detail(record);
+    check(second && second->normal==Vec3{0,1,0} && second->speed==20 && second->point==Vec3{10,20,30},
+        "A stronger second native contact direction is not discarded because the first normal is valid");
+    check(second && !second->point_valid,"Two native directions cannot associate the shared point with the strongest normal");
+    write(0x50,30.f);
+    check(decode_contact_detail(record)->normal==Vec3{1,0,0} && decode_contact_detail(record)->grounded,
+        "A stronger wall contact retains its speed without hiding a simultaneous supporting ground normal");
+    write(0,Vec3{std::numeric_limits<float>::quiet_NaN(),0,0});
+    check(decode_contact_detail(record)->normal==Vec3{0,1,0},"An invalid normal cannot hide another valid native contact");
+    write(0x54,std::numeric_limits<float>::infinity());
+    check(!decode_contact_detail(record) && !decode_contact_detail(std::span(record).first(0x60)),
+        "Invalid speeds and partial native records cannot invent usable contact detail");
+    record={};
+    check(!decode_contact_detail(record),"A native-cleared record has no contact normal or position");
+    write(0,Vec3{0,1,0}); write(0x50,10.f); write(0x40,Vec3{.3f,0,0});
+    check(decode_contact_detail(record)->point_valid,"A single contact direction has an attributable world contact point");
+    write(0x40,Vec3{std::numeric_limits<float>::quiet_NaN(),0,0});
+    check(decode_contact_detail(record) && !decode_contact_detail(record)->point_valid,
+        "Malformed contact position disables rotation evidence while retaining usable linear contact detail");
+}
+void rotational_contacts() {
+    const auto pose=[](float angle) {
+        const float sine=std::sin(angle),cosine=std::cos(angle);
+        return std::array<float,16>{cosine,sine,0,0,-sine,cosine,0,0,0,0,1,0,0,0,0,1};
+    };
+    for (int scenario=0;scenario<9;++scenario) {
+        Challenge c; auto f=skater(); f.body_count=1; f.center={};
+        auto& body=f.bodies[0]; body.joint=102; body.injury_joint=103;
+        body.pose=pose(0); body.pose_valid=true;
+        c.begin(f); f.bailed=true; c.step(f);
+        body.pose=pose(-.4f);
+        if (scenario==8) body.velocity={0,-20,0};
+        c.step(f);
+        if (scenario==6) {f.valid=false; c.step(f); f.valid=true;}
+        body.contact=scenario!=1; body.normal={0,1,0};
+        body.contact_point={.3f,0,0}; body.point_valid=true;
+        body.velocity={};
+        if (scenario==2) body.pose=pose(-.8f); // Constant spin: no stopping impact.
+        if (scenario==3) body.point_valid=false;
+        if (scenario==4 || scenario==8) body.pose_valid=false;
+        if (scenario==5) body.pose=pose(2.f); // Reject an ambiguous large turn.
+        if (scenario==7) body.contact_point={10,0,0}; // Wrong/remote point.
+        c.step(f);
+        if (scenario==0)
+            check(c.result().impacts==1 && c.result().bone_injuries[103].severity>0,
+                "A contact-confirmed rotational stop injures the skull even with zero center linear velocity");
+        else if (scenario==8)
+            check(c.result().impacts==1,"Missing optional pose detail preserves ordinary linear impact detection");
+        else
+            check(c.result().impacts==0 && c.result().bone_injuries[103].severity==0,
+                "Constant spin, no contact, missing point/pose, large turns, telemetry gaps and remote points cannot invent rotational injury");
+    }
+    Challenge c; auto f=skater(); f.body_count=1;
+    auto& body=f.bodies[0]; body.pose=pose(0); body.pose_valid=true;
+    c.begin(f); f.bailed=true; f.grounded=true; c.step(f);
+    for (int i=0;i<55;++i) {body.pose=pose(i%2 ? 0.f : .2f); c.step(f);}
+    check(c.result().phase==Phase::bailed,"A still-spinning ragdoll cannot settle solely because its linear speed is low");
+}
+void impacts_before_bail() {
+    for (int scenario=0;scenario<8;++scenario) {
+        Challenge c; auto f=skater();
+        f.bodies[0].joint=102; f.bodies[0].injury_joint=103;
+        f.bodies[1].joint=343; f.bodies[1].region=Region::left_leg;
+        c.begin(f); fall(f,c,12);
+        for (std::size_t i=0;i<f.body_count;++i) {
+            auto& body=f.bodies[i];body.velocity={};body.contact=true;body.normal={0,1,0};
+        }
+        // The collision resolves while the animation still reports upright.
+        c.step(f);
+        check(c.result().phase==Phase::attempt && c.result().impacts==0 &&
+            c.result().bone_injuries[103].severity==0 && c.result().bone_injuries[343].severity==0,
+            "An upright impact retains evidence without awarding damage or score");
+        if (scenario==1) f.manual_bail=true;
+        if (scenario==2) {for (int i=0;i<11;++i)c.step(f);} // Older than 200ms.
+        if (scenario==3) {f.valid=false;c.step(f);f.valid=true;}
+        if (scenario==4) {++f.entity;}
+        if (scenario==5) {f.center[0]+=100;}
+        if (scenario==6) {f.bodies[0].joint=101;f.bodies[0].injury_joint=101;}
+        if (scenario==7) {f.bodies[0].contact=f.bodies[1].contact=false;c.step(f);}
+        f.bailed=true;c.step(f);
+        if (scenario==0 || scenario==7) {
+            check(c.result().bone_injuries[103].severity>0 && c.result().bone_injuries[343].severity>0 &&
+                c.result().impacts==2,"A delayed natural bail retains simultaneous skull and foot hits after they have already slowed or separated");
+            const auto head=c.result().bone_injuries[103].severity;
+            for (int i=0;i<15;++i)c.step(f);
+            check(c.result().bone_injuries[103].severity==head && c.result().impacts==2,
+                "Committing a retained impact cannot repeat it during a resting contact");
+        } else if (scenario==6) {
+            check(c.result().bone_injuries[101].severity==0 && c.result().bone_injuries[103].severity==0 &&
+                c.result().bone_injuries[343].severity>0,"Changing one body's identity rejects its history without losing another body's valid impact");
+        } else {
+            check(c.result().bone_injuries[103].severity==0 && c.result().bone_injuries[343].severity==0 &&
+                c.result().impacts==0,"Manual bails, stale history, telemetry gaps, ownership changes and teleports cannot revive prior upright damage");
+        }
+    }
+    Challenge c;auto f=skater();f.body_count=1;f.bodies[0].joint=102;f.bodies[0].injury_joint=103;
+    c.begin(f);
+    auto& head=f.bodies[0];head.contact=true;head.normal={0,1,0};head.velocity={};
+    head.contact_speed=18;head.speed_valid=true;c.step(f);
+    f.bailed=true;c.step(f);
+    check(c.result().bone_injuries[103].fractured && c.result().impacts==1,
+        "A native-recorded contact speed retains the skull hit when animation has already erased the linear delta");
+    const auto severity=c.result().bone_injuries[103].severity;
+    for(int i=0;i<20;++i)c.step(f);
+    check(c.result().bone_injuries[103].severity==severity,"A held native contact speed cannot duplicate an injury");
+    c.begin(skater());f=skater();f.bodies[0].contact_speed=18;f.bodies[0].speed_valid=true;f.bailed=true;c.step(f);
+    check(c.result().impacts==0,"Native speed without a confirmed contact never scores");
+}
+void board_landing_load() {
+    for (unsigned scenario=0;scenario<13;++scenario) {
+        Challenge c; auto f=skater(); f.body_count=2; f.dt=.033f;
+        f.bodies[0].joint=10; f.bodies[0].injury_joint=10; f.bodies[0].region=Region::right_leg;
+        f.bodies[1].joint=343; f.bodies[1].injury_joint=343; f.bodies[1].region=Region::left_leg;
+        for (auto& body:f.bodies) body.velocity={};
+        // Captured high-drop trace: owned ridden board, incoming ~20m/s,
+        // cause 6 ~20m/s and an upward support normal, with no foot contacts.
+        f.board.identity=100; f.board.riding=scenario!=3; f.board.velocity={-2.067f,-20.0f,-6.950f};
+        if (scenario==12) f.board.hard_landing=true;
+        if (scenario==12) {f.board.speed=20;f.board.normal={0,1,0};}
+        c.begin(f);
+        if (scenario==8) {auto gap=f;gap.valid=false;c.step(gap);}
+        if (scenario==6) f.board.velocity={-2,-20,-7}; else f.board.velocity={-1.961f,0,-7.152f};
+        f.board.hard_landing=scenario!=4; f.board.normal=scenario==5 ? Vec3{0,0,1} : Vec3{0,1,0}; f.board.speed=20;
+        if (scenario==7) f.board.identity=101;
+        if (scenario==10) f.center[0]=100;
+        f.bailed=scenario!=1 && scenario!=2 && scenario!=11;
+        f.manual_bail=scenario==9;
+        c.step(f);
+        if (scenario==1 || scenario==2 || scenario==11) {
+            check(c.result().impacts==0 && c.result().bone_injuries[10].severity==0,
+                "A hard board landing cannot damage feet until it causes a bail");
+            if (scenario==2) for (int i=0;i<8;++i)c.step(f);
+            if (scenario==11) f.board.identity=101;
+            f.bailed=true;c.step(f);
+        }
+        const bool accepted=scenario<=1;
+        check((c.result().bone_injuries[10].severity>0)==accepted &&
+            (c.result().bone_injuries[343].severity>0)==accepted,
+            "Feet receive only recent native-confirmed landings from a continuously owned ridden board");
+        if (accepted) {
+            check(c.result().bone_injuries[10].severity>199 && c.result().bone_injuries[10].severity<201 &&
+                c.result().bone_injuries[343].severity==c.result().bone_injuries[10].severity && c.result().impacts==2,
+                "The captured landing shares severity across both feet and their two scoring regions");
+            const auto severity=c.result().bone_injuries[10].severity;
+            for(int i=0;i<8;++i)c.step(f);
+            check(c.result().bone_injuries[10].severity==severity && c.result().impacts==2,
+                "A held native landing flag cannot repeat foot damage");
+        }
+    }
 }
 void pose_publication_order() {
     PosePublication clock;
@@ -629,7 +844,7 @@ void personal_best_transactions() {
 int main() {
     lifecycle(); contact_scoring(); same_region(); invalidation(); free_fall_and_rest(); recovery_and_timeout(); native_regressions(); camera_timing(); rendered_pose(); mesh_skinning(); rendered_world_skinning(); raster_camera_input(); render_root_timing(); mesh_streams(); individual_bone_hits(); pose_publication_order(); challenge_progression(); saved_personal_bests();
     personal_best_transactions();
-    varied_fracture_planes();
+    varied_fracture_planes(); rapid_head_hits_and_contact_episodes(); contact_record_selection(); rotational_contacts(); impacts_before_bail(); board_landing_load();
     if (failures) return 1;
     std::cout << "Slam Challenge scoring and lifecycle checks passed.\n";
 }
