@@ -1,4 +1,5 @@
 #include "slam_runtime.h"
+#include "slam_availability.h"
 #include "slam_telemetry.h"
 #include "slam_pose.h"
 #include "slam_pose_publication.h"
@@ -62,6 +63,7 @@ struct State {
     bool replay_contracts_checked{};
     std::atomic<bool> replay_contracts_ok{};
     Snapshot published;
+    const char* attempt_issue{};
     Frame last;
     std::optional<Action> pending;
     bool audio_preview_requested{};
@@ -1102,8 +1104,9 @@ void tick(std::uintptr_t base, std::uintptr_t client, std::uintptr_t entity, boo
         }
         s.published.normal_xray_available=!visual_issue;
         s.map = map;
-        s.published.available = !issue && s.last.valid && GetTickCount64() - s.last_at < 250;
-        if (issue) s.published.availability = issue;
+        s.attempt_issue = issue;
+        publish_attempt_availability(s.published, s.attempt_issue,
+            s.last.valid && GetTickCount64() - s.last_at < 250, s.last.bailed);
         bool explicit_bail=false;
         if (s.pending) {
             const auto action = *s.pending;
@@ -1389,14 +1392,13 @@ void observe_skeleton(std::uintptr_t rig, float seconds, bool wipeout) noexcept 
         Frame frame;
         (void)capture(current, seconds, s.bail_latched, frame, s.published);
         ++s.published.samples;
-        if (!frame.valid) { ++s.published.dropped; s.published.available = false; }
+        if (!frame.valid) ++s.published.dropped;
         else {
             s.last = frame;
             s.last_at = GetTickCount64();
-            s.published.available = true;
             s.published.bailed = frame.bailed;
-            s.published.availability = frame.bailed ? "Recover and get back on your board before retrying." : "Ready to start an attempt.";
         }
+        publish_attempt_availability(s.published, s.attempt_issue, frame.valid, frame.bailed);
         const auto previous_phase = s.challenge.result().phase;
         s.challenge.step(frame);
         if (s.published.visuals.normal_play || s.published.visuals.replay) {

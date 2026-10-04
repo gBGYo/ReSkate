@@ -1,5 +1,6 @@
 #include "Extension/Slam/slam_model.h"
 #include "Extension/Slam/slam_telemetry.h"
+#include "Extension/Slam/slam_availability.h"
 #include "Extension/Slam/slam_pose.h"
 #include "Extension/Slam/slam_mesh.h"
 #include "Extension/Slam/slam_pose_publication.h"
@@ -886,7 +887,31 @@ void personal_best_transactions() {
     (void)book.lookup(map,config,read);
     check(reads==reads_before,"Recently recorded and unsaved bests use the session cache");
 }
+void attempt_availability() {
+    Snapshot output;
+    constexpr auto issue = "Turn off No Bail before starting an attempt.";
+    publish_attempt_availability(output, nullptr, true, false);
+    check(output.available, "A fresh unrestricted physics sample enables attempts");
+    for (unsigned i = 0; i < 20; ++i) {
+        // Interleave the game tick and physics publication as the live menu sees them.
+        publish_attempt_availability(output, issue, true, false);
+        check(!output.available && output.availability == issue, "No Bail keeps attempts disabled at the game tick");
+        publish_attempt_availability(output, issue, true, i % 2 != 0);
+        check(!output.available && output.availability == issue, "Fresh physics cannot flicker the No Bail warning or start button");
+    }
+    output.availability = "Skeleton body mapping is unavailable.";
+    publish_attempt_availability(output, issue, false, false);
+    check(!output.available && output.availability == issue, "Rejected physics also preserves the active restriction");
+    publish_attempt_availability(output, nullptr, true, false);
+    check(output.available && output.availability == "Ready to start an attempt.", "Turning No Bail off restores readiness with a fresh sample");
+    publish_attempt_availability(output, nullptr, true, true);
+    check(output.available && output.availability == "Recover and get back on your board before retrying.", "Bailed samples retain the recovery guidance");
+    output.availability = "Skeleton body mapping is unavailable.";
+    publish_attempt_availability(output, nullptr, false, false);
+    check(!output.available && output.availability == "Skeleton body mapping is unavailable.", "Unrestricted capture failures keep their diagnostic");
+}
 int main() {
+    attempt_availability();
     lifecycle(); contact_scoring(); same_region(); invalidation(); free_fall_and_rest(); recovery_and_timeout(); native_regressions(); camera_timing(); rendered_pose(); mesh_skinning(); rendered_world_skinning(); raster_camera_input(); render_root_timing(); mesh_streams(); individual_bone_hits(); pose_publication_order(); challenge_progression(); saved_personal_bests();
     personal_best_transactions();
     saved_damage_thresholds();
