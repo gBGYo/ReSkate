@@ -1,5 +1,6 @@
 #include "Extension/Slam/slam_replay.h"
 #include "Extension/Slam/slam_replay_native.h"
+#include "Engine/Game/Multiplayer/session_tools.h"
 #include <iostream>
 #include <limits>
 #include <unordered_map>
@@ -158,6 +159,43 @@ void native_clock() {
     };
     check(!read_replay_clock(base,torn),"Concurrent recorder changes cannot publish a torn clock");
 }
+void replay_actor() {
+    namespace e=dingosdk::game::build::v20260929::engine;
+    constexpr std::uintptr_t base=0x140000000,client=0x100000,world=0x200000,manager=0x300000,
+        entries=0x400000,player=0x500000,entity=0x600000,handle=0x700000,collection=0x800000;
+    Memory memory;
+    memory.set(client,base+e::client_vtable); memory.set(client+8,world);
+    memory.set(base+e::context_player_manager_offset,unsigned{0x100});
+    memory.set(world+0x100,manager); memory.set(manager,base+e::local_player_manager_vtable);
+    memory.set(manager+0x4c8,entries); memory.set(manager+0x4d0,entries+8); memory.set(entries,player);
+    memory.set(player,base+e::local_player_vtable); memory.set(player+0x78,world);
+    memory.set(player+0x45,std::uint8_t{1}); memory.set(player+0x44,std::uint8_t{});
+    memory.set(player+0xb8,entity); memory.set(player+0xb0,handle); memory.set(handle,entity+8);
+    memory.set(entity,base+e::skater_entity_vtable); memory.set(entity+0x20,world);
+    memory.set(entity+0xf8,player); memory.set(entity+0x70,collection); memory.set(collection,entity);
+    auto read=[&](std::uintptr_t at,void* out,std::size_t size) {return memory.read(at,out,size);};
+    for (const bool multiplayer : {false,true}) {
+        dingosdk::set_multiplayer_session_active(multiplayer);
+        const auto actor=read_replay_actor(base,client,read);
+        check(actor && actor->base==base && actor->entity==entity && actor->world==world,
+            "Solo and multiplayer replay bind the verified local skater without live physics");
+        check(actor && !actor->core && !actor->context && !actor->rig && !actor->selector,
+            "Replay visual ownership cannot authorize gameplay actions");
+    }
+    memory.set(player+0x44,std::uint8_t{1});
+    check(!read_replay_actor(base,client,read),"A remote multiplayer skater cannot own the replay X-ray");
+    memory.set(player+0x44,std::uint8_t{}); memory.set(player+0x45,std::uint8_t{});
+    check(!read_replay_actor(base,client,read),"Replay X-rays require the local player flag");
+    memory.set(player+0x45,std::uint8_t{1}); memory.set(entity+0xf8,manager);
+    check(!read_replay_actor(base,client,read),"A stale player backlink cannot authorize a replay X-ray");
+    memory.set(entity+0xf8,player); memory.set(handle,collection);
+    check(!read_replay_actor(base,client,read),"A stale entity handle cannot authorize a replay X-ray");
+    memory.set(handle,entity+8); memory.set(collection,player);
+    check(!read_replay_actor(base,client,read),"A different pose collection cannot authorize a replay X-ray");
+    memory.set(collection,entity); memory.set(manager+0x4d0,entries+16);
+    check(!read_replay_actor(base,client,read),"An ambiguous local player list cannot authorize a replay X-ray");
+    dingosdk::set_multiplayer_session_active(false);
+}
 void settings() {
     VisualOptions options; options.replay=false;
     check(decode_visual_options(encode_visual_options(options))==std::optional(options),"Replay display preference saves and restores");
@@ -186,6 +224,6 @@ void render_identity() {
 }
 }
 int main() {
-    timeline(); native_clock(); settings(); render_identity();
+    timeline(); native_clock(); replay_actor(); settings(); render_identity();
     return failures ? 1 : 0;
 }

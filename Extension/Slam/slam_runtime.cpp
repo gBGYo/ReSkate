@@ -163,21 +163,10 @@ bool replay_mode(std::uintptr_t base) {
         pointer(pointer(pointer(base+r::client)+r::manager)+r::lease)!=0;
 }
 bool resolve_replay_actor(std::uintptr_t base,std::uintptr_t client,LocalBailOwner& out) {
-    namespace e=game::build::v20260929::engine;
-    unsigned offset{};
-    if (pointer(client)!=base+e::client_vtable || !read(base+e::context_player_manager_offset,offset) || offset>0x1000000) return false;
-    const auto world=pointer(client+8),manager=pointer(world+offset);
-    const auto begin=pointer(manager+0x4c8),end=pointer(manager+0x4d0);
-    if (!world || pointer(manager)!=base+e::local_player_manager_vtable || !begin || end!=begin+8) return false;
-    const auto player=pointer(begin),entity=pointer(player+0xb8);
-    std::uint8_t local{},remote{};
-    if (pointer(player)!=base+e::local_player_vtable || pointer(player+0x78)!=world ||
-        !read(player+0x45,local) || local!=1 || !read(player+0x44,remote) || remote ||
-        pointer(entity)!=base+e::skater_entity_vtable || pointer(entity+0x20)!=world || pointer(entity+0xf8)!=player ||
-        pointer(pointer(player+0xb0))!=entity+8 || pointer(pointer(entity+0x70))!=entity) return false;
-    // A visual identity deliberately carries no physics core, rig or selector.
-    // It can never authorize a bail, teleport or telemetry capture.
-    out={base,entity,world,0,0,0,0};
+    const auto actor=read_replay_actor(base,client,
+        [](std::uintptr_t at,void* value,std::size_t size) {return memory::peek_bytes(at,value,size);});
+    if (!actor) return false;
+    out=*actor;
     return true;
 }
 bool valid_visual_watch(const Watch& watch,LocalBailOwner& current) {
@@ -909,10 +898,9 @@ void tick(std::uintptr_t base, std::uintptr_t client, std::uintptr_t entity, boo
         }
         const auto clock=replay_clock(base);
         const bool replaying=replay_mode(base);
-        const bool offline=!multiplayer_session_active();
         LocalBailOwner owner;
         LocalBailOwner replay_actor;
-        const bool replay_owned=replaying && offline && !editor && clock && clock->playback &&
+        const bool replay_owned=replaying && !editor && clock && clock->playback &&
             resolve_replay_actor(base,client,replay_actor);
         const bool owned = !replaying && ready && !noclip && !editor &&
             resolve_local_bail_owner(client, entity, owner);

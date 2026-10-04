@@ -143,9 +143,10 @@ skeleton while skating without starting or resetting a Slam attempt. It follows 
 automatically clears injury highlights after recovery, and does not open the Slam score HUD.
 The same visibility settings apply; **During attempts** becomes **Always** in normal play.
 **X-ray in replay** under **Skater → SLAM → X-RAY** is enabled by default. It follows the replay
-editor's skater and camera, including paused views, and restores injuries and effect timing when
-you scrub forward or backward. It retains up to ten minutes of injury history from the current
-offline session, capped at 2,048 changed states. Loading, a different local skater or a reset
+editor's local skater and camera in solo and multiplayer sessions, including paused views, and
+restores injuries and effect timing when you scrub forward or backward. It retains up to ten
+minutes of injury history from the current session, capped at 2,048 changed states. Loading,
+a different local skater or a reset
 recording clears that history. Recordings outside the retained history show neutral bones;
 injury-only filters can therefore hide them. Injury metadata is not saved with replay files.
 Video exports use the native export frame time to restore injuries and fracture effects, so
