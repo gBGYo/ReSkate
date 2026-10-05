@@ -596,7 +596,8 @@ namespace dingosdk::overlay {
 ReplayCaptureResult capture_slam_frame(std::span<std::uint8_t> pixels,const replay_export::BgraFrame& frame,
     const slam::Snapshot& value) noexcept {
     try {
-        if (!value.visuals.replay || value.visuals.visibility==slam::XrayVisibility::off) return ReplayCaptureResult::inactive;
+        if (!value.visuals.normal_play || !value.visuals.replay || value.visuals.visibility==slam::XrayVisibility::off)
+            return ReplayCaptureResult::inactive;
         if (!value.replay_active || !value.replay_available || !value.mesh || !value.mesh_pose ||
             !value.mesh_pose->render_camera) return ReplayCaptureResult::unavailable;
         const auto appearance=slam::visual_appearance(value.visuals,value.replay_result,value.replay_events,

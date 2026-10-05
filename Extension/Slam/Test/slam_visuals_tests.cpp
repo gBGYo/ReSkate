@@ -34,6 +34,17 @@ void saved_options() {
     check(decode_visual_options(R"({"version":1,"visibility":0,"opacity":0.86,"flash":0.35,"impactSeconds":1.5,"reduced":false})")==std::optional(defaults),
         "Original X-ray saves gain the new impact options without losing their saved settings");
     const auto encoded=encode_visual_options(options);
+    for (unsigned mode=0;mode<4;++mode) {
+        auto saved=encoded;
+        const auto at=saved.find("\"visibility\":2");
+        saved.replace(at,14,"\"visibility\":"+std::to_string(mode));
+        const auto restored=decode_visual_options(saved);
+        auto expected=options;
+        expected.visibility=mode==1 ? XrayVisibility::impact : static_cast<XrayVisibility>(mode);
+        check(restored==std::optional(expected),"Saved Always and Off choices are preserved; only After bailing migrates to After impacts");
+        if (restored) check(decode_visual_options(encode_visual_options(*restored))==restored,
+            "Each supported visibility choice survives saving again without losing fade duration or filters");
+    }
     auto before_fracture_filter=encoded;
     const auto filter_at=before_fracture_filter.find("\"onlyFractured\":true,");
     before_fracture_filter.erase(filter_at,std::string_view("\"onlyFractured\":true,").size());
@@ -93,7 +104,7 @@ void normal_play_falls() {
     frame.center={0,10,0}; frame.body_count=1; frame.bodies[0].region=Region::head; frame.bodies[0].joint=102;
     VisualOptions options;
     check(visual_appearance(options,xray.result(),xray.events(),1000,false,true).opacity==options.opacity,
-        "Always-on normal X-ray does not require a started challenge");
+        "Always shows the normal-play skeleton without waiting for an impact");
     check(visual_appearance(options,xray.result(),xray.events(),1000,false).opacity==0,
         "Slam still requires an attempt when standalone mode is off");
     options.visibility=XrayVisibility::impact; options.only_impacted=true;
@@ -118,11 +129,8 @@ void normal_play_falls() {
     check(xray.result().phase==Phase::ready && !xray.events().latest_impact_ms,"Disabling or losing the skater clears standalone injuries");
     frame.bailed=true; xray.step(frame,8000);
     check(xray.result().phase==Phase::ready,"Enabling while already down cannot create an unmeasured impact");
-    options.visibility=XrayVisibility::attempt;
-    check(visual_appearance(options,xray.result(),xray.events(),8000,false,true).opacity>0,"Always-on X-ray still shows the skeleton when enabled while down");
+    check(visual_appearance(options,xray.result(),xray.events(),8000,false,true).opacity==0,"Enabling while down waits for a measured impact before showing bones");
     check(visual_appearance(options,xray.result(),xray.events(),8000,true,true).opacity==0,"First-person camera hides standalone X-ray too");
-    options.visibility=XrayVisibility::off;
-    check(visual_appearance(options,xray.result(),xray.events(),8000,false,true).opacity==0,"Off overrides standalone X-ray");
 }
 void normal_play_recovery_fade() {
     for (const float duration : {.3f,1.5f,5.f}) {
@@ -135,8 +143,8 @@ void normal_play_recovery_fade() {
         frame.bailed=true; frame.grounded=true; frame.bodies[0].contact=true;
         frame.bodies[0].normal={0,1,0}; frame.bodies[0].velocity={};
         recovered.step(frame,1020); bailed.step(frame,1020);
-        VisualOptions options; options.visibility=XrayVisibility::impact;
-        options.only_impacted=true; options.impact_duration_s=duration;
+        VisualOptions options;
+        options.visibility=XrayVisibility::impact; options.only_impacted=true; options.impact_duration_s=duration;
         const auto appearance=[&](const FreeplayXray& xray,std::uint64_t now) {
             return visual_appearance(options,xray.impact_result(),xray.impact_events(),now,false,true);
         };
@@ -239,15 +247,18 @@ void configurable_bone_damage() {
     Result result; result.phase=Phase::bailed; result.config.scoring.bruise_threshold=100;
     VisualEvents events;
     result.bone_injuries[277].severity=99;
+    events.observe(result,1000);
     const auto light=visual_appearance(options,result,events,1000,false);
     check(light.colors[277][3]==0 && light.damage[277][1]==0 && !is_bruised(result.bone_injuries[277],result.config.scoring),
         "Damage below the bruise threshold is not marked or revealed by contact-only X-ray");
     result.bone_injuries[277].severity=100;
+    events.observe(result,1000);
     const auto bruised=visual_appearance(options,result,events,1000,false);
     check(bruised.colors[277][3]==options.opacity && bruised.colors[277][1]==.55f &&
         std::string_view(injury_state_name(result.bone_injuries[277],result.config.scoring))=="bruised",
         "Reaching the bruise threshold reveals the yellow injury and its result label");
     result.bone_injuries[277].fractured=true; options.only_fractured=true;
+    events.observe(result,1000);
     const auto broken=visual_appearance(options,result,events,1000,false);
     check(broken.colors[277][3]==options.opacity && broken.colors[277][1]==.16f,
         "Fractures take precedence over bruises in fracture-only X-ray");
@@ -256,7 +267,7 @@ void configurable_bone_damage() {
     Frame frame; frame.valid=true; frame.entity=11; frame.world=22; frame.dt=.02f;
     frame.center={0,10,0}; frame.body_count=1;
     auto& head=frame.bodies[0]; head.region=Region::head; head.joint=103; head.velocity={0,-20,0};
-    ScoreRules rules; rules.bruise_threshold=500; rules.head_fracture=1000; rules.limb_fracture=1500;
+    ScoreRules rules; rules.bruise_threshold=500; rules.fracture_threshold=1000;
     xray.step(frame,1000);
     xray.step(frame,1020,rules);
     check(xray.result().config.scoring==rules,"Changing thresholds before a normal-play fall updates its armed rules");
@@ -264,7 +275,7 @@ void configurable_bone_damage() {
     xray.step(frame,1040,rules);
     check(xray.result().bone_injuries[103].severity>0 && !is_bruised(xray.result().bone_injuries[103],rules) &&
         !xray.result().bone_injuries[103].fractured,"Normal-play impacts use the configured bruise and fracture thresholds");
-    ScoreRules next_rules; next_rules.head_fracture=10; next_rules.limb_fracture=20;
+    ScoreRules next_rules; next_rules.fracture_threshold=10;
     xray.step(frame,1060,next_rules);
     check(xray.result().config.scoring==rules && !xray.result().bone_injuries[103].fractured,
         "Changing thresholds during a fall cannot relabel it or retroactively trigger a crack");
@@ -565,13 +576,11 @@ void visibility_and_flashes() {
     VisualEvents events;
     Result result; result.phase=Phase::attempt;
     events.observe(result,1000);
-    check(visual_appearance(options,result,events,1000,false).opacity==options.opacity,"Attempt mode shows the skeleton while skating");
-    options.visibility=XrayVisibility::bail;
-    check(visual_appearance(options,result,events,1000,false).opacity==0,"Bail mode hides it before a fall");
-    result.phase=Phase::bailed;
-    check(visual_appearance(options,result,events,1000,false).opacity==options.opacity,"Bail mode shows it after a bail without requiring an impact");
+    check(visual_appearance(options,result,events,1000,false).opacity==options.opacity,"Always shows the skeleton before impacts");
     options.visibility=XrayVisibility::impact;
-    check(visual_appearance(options,result,events,1000,false).opacity==0,"Impact mode waits for a scored contact");
+    check(visual_appearance(options,result,events,1000,false).opacity==0,"The skeleton stays hidden while skating without impacts");
+    result.phase=Phase::bailed;
+    check(visual_appearance(options,result,events,1000,false).opacity==0,"Bailing alone cannot reveal the skeleton without an impact");
     result.impacts=1; result.injuries[0].severity=100; result.bone_injuries[102].severity=100;
     events.observe(result,2000);
     auto fresh=visual_appearance(options,result,events,2000,false);
@@ -591,11 +600,17 @@ void visibility_and_flashes() {
     const auto fading=visual_appearance(options,result,events,3300,false);
     check(fading.opacity>0 && fading.opacity<options.opacity,"Timed visibility fades smoothly before expiring");
     check(visual_appearance(options,result,events,3500,false).opacity==0,"Timed visibility expires at its configured duration");
+    options.visibility=XrayVisibility::always; options.only_impacted=true;
+    const auto always=visual_appearance(options,result,events,3500,false);
+    check(always.opacity==options.opacity && always.colors[102][3]==options.opacity && always.colors[7][3]==0,
+        "Always retains impacted bones after the fade duration and still respects the bone filter");
+    options.visibility=XrayVisibility::impact; options.only_impacted=false;
     result.impacts=2; result.injuries[2].severity=300; result.injuries[2].fractured=true;
     result.bone_injuries[277]={300,0,true};
     events.observe(result,4000);
     options.reduced_effects=true;
     const auto reduced=visual_appearance(options,result,events,4000,false);
+    check(reduced.opacity==options.opacity,"A new impact refreshes visibility after the previous fade has expired");
     check(reduced.colors[277][0]==1 && reduced.colors[277][1]==.16f && reduced.colors[277][2]==.22f,
         "Reduced effects retains the steady fracture color and removes transient tints");
     options.only_fractured=true;
@@ -614,14 +629,14 @@ void visibility_and_flashes() {
     check(events.impacts_at_ms[102]==2000 && events.impacts_at_ms[277]==4000,"A second bone keeps its own impact time");
     check(visual_appearance(options,result,events,4000,true).opacity==0,"First person hides the mesh before it can cover the camera");
     options.visibility=XrayVisibility::off;
-    check(visual_appearance(options,result,events,4000,false).opacity==0,"Off disables only the X-ray presentation");
-    options.visibility=XrayVisibility::attempt;
+    check(visual_appearance(options,result,events,4000,false).opacity==0 && events.latest_impact_ms==4000,
+        "Off hides the skeleton while preserving injury events for other Slam effects");
+    options.visibility=XrayVisibility::impact;
     result.cancelled=true; events.observe(result,4500);
     check(!events.latest_impact_ms && visual_appearance(options,result,events,4500,false).opacity==0,
         "Stopping, unloading or losing the skater clears effects");
     result.cancelled=false; result.phase=Phase::attempt; result.impacts=0; result.injuries={}; result.bone_injuries={};
     events.observe(result,5000);
-    options.visibility=XrayVisibility::impact;
     check(visual_appearance(options,result,events,5000,false).opacity==0,"A fresh attempt cannot inherit the last attempt's flash");
     result.impacts=1; result.injuries[0].severity=50; result.bone_injuries[102].severity=50; events.observe(result,6000);
     result.impacts=0; result.injuries={}; result.bone_injuries={}; events.observe(result,6100);

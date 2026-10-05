@@ -5,29 +5,28 @@
 #include <format>
 namespace dingosdk::console {
 void register_movement_commands(Commands &registry) {
-    auto slam_action = argument("start|retry|bail|stop|dismiss|status", Type::text, true);
-    slam_action.choices = {"start", "retry", "bail", "stop", "dismiss", "status"};
-    auto slam_entry = action("slam", "Offline Slam Challenge controls and physics telemetry", Group::movement, {slam_action});
+    auto slam_action = argument("bail|status", Type::text, true);
+    slam_action.choices = {"bail", "status"};
+    auto slam_entry = action("slam", "Normal-play Slam manual bail and physics telemetry", Group::movement, {slam_action});
     slam_entry.run = [](const Model &, const Values &args, const Output &out) {
         const auto operation = args.empty() ? std::string("status") : std::get<std::string>(args[0]);
         if (operation == "status") {
             const auto value = slam::snapshot();
-            out(std::format("Slam: {} | {} points | {} impacts | {} fractures. {}", slam::phase_name(value.result.phase),
-                value.result.points, value.result.impacts, value.result.fractures, value.result.detail));
+            out(std::format("Slam: {} | {} impacts | {} fractures. Enable or disable in Skater > Camera.",
+                value.visuals.normal_play ? "enabled" : "disabled",value.normal_xray_result.impacts,value.normal_xray_result.fractures));
             out(std::format("{} Samples: {}, rejected: {}, contacts: {}, physics state: {}.",
                 value.availability, value.samples, value.dropped, value.contacts, value.physics_state));
             out(std::format("{} Manual bails queued: {}, selected: {}, animation published: {}.",
                 value.bail_status,value.manual_bails_queued,value.manual_bails_selected,value.manual_bails_published));
-            out(value.retry_status);
             if (value.replay_active)
                 out(std::format("Replay X-ray: {} | {:.3f}s | injury history {}.",
                     value.replay_available ? "ready" : "waiting for the local render actor",
                     static_cast<double>(value.replay_time_ms)/1000,
                     value.replay_injuries_known ? "matched" : "unavailable (neutral bones)"));
+        } else if (operation == "bail") {
+            out(slam::request(slam::Action::bail) ? "Slam bail queued." : "Enable Slam in Skater > Camera; only one bail can be queued at a time.");
         } else {
-            const auto request = operation == "stop" ? slam::Action::stop : operation == "dismiss" ? slam::Action::dismiss :
-                operation=="bail" ? slam::Action::bail : operation=="retry" ? slam::Action::retry : slam::Action::start;
-            out(slam::request(request) ? "Slam control queued." : "A Slam control is already queued.");
+            out("Slam supports bail or status. Challenges are disabled.");
         }
     };
     registry.add(std::move(slam_entry));

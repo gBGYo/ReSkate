@@ -6,12 +6,15 @@
 #include <vector>
 
 namespace dingosdk::slam {
-enum class XrayVisibility : unsigned { attempt, bail, impact, off, count };
+// Preserve the existing profile values; 1 was the removed After bailing mode.
+enum class XrayVisibility : unsigned { always=0, impact=2, off=3 };
 const char* xray_visibility_name(XrayVisibility value) noexcept;
 struct VisualOptions {
-    XrayVisibility visibility = XrayVisibility::attempt;
+    XrayVisibility visibility = XrayVisibility::always;
     float opacity = .86f, flash_strength = .35f, impact_duration_s = 1.5f;
-    bool reduced_effects{}, only_impacted{}, only_fractured{}, normal_play{};
+    bool reduced_effects{}, only_impacted{}, only_fractured{};
+    // Master Slam switch; retain the normalPlay profile key for existing saves.
+    bool normal_play{};
     bool fracture_marks = true, impact_sound = true;
     bool replay = true;
     float sound_volume = .45f;

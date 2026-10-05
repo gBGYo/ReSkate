@@ -256,7 +256,7 @@ bool render_mesh(Renderer& r,ID3D12Device* device,ID3D12GraphicsCommandList* com
         }
         const bool replay=value.replay_active && value.replay_available && value.visuals.replay;
         const bool normal_play=!value.replay_active && value.visuals.normal_play && value.normal_xray_available;
-        if ((value.replay_active && !replay) ||
+        if (!value.visuals.normal_play || (value.replay_active && !replay) ||
             (!replay && !normal_play && (!value.visible || !value.xray_context_valid || value.result.cancelled)) || !value.mesh || !value.mesh_pose ||
             (!capture && GetTickCount64()-value.mesh_pose->at_ms>=250)) return false;
         const auto& shown_result=replay ? value.replay_result : normal_play ? value.normal_xray_result : value.result;
@@ -405,7 +405,7 @@ bool capture_slam_mesh(ID3D12Device* device,const slam::Snapshot& value,
     auto& c=capture_renderer();
     const auto checked=replay_export::bgra_frame(frame.width,frame.height,frame.pitch);
     if (!device || c.failed || !checked || checked->bytes!=frame.bytes || pixels.size()<frame.bytes ||
-        !value.replay_active || !value.replay_available || !value.visuals.replay || !value.mesh_pose ||
+        !value.visuals.normal_play || !value.replay_active || !value.replay_available || !value.visuals.replay || !value.mesh_pose ||
         !value.mesh_pose->render_camera) return false;
     try {
         finish_capture(c);

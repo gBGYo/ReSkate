@@ -54,6 +54,7 @@ struct Snapshot {
     bool available{}, visible{}, pose_valid{}, bailed{}, first_person{}, visual_options_ready{}, xray_context_valid{}, normal_xray_available{};
 };
 // Presentation/console threads only queue controls and copy immutable snapshots.
+// Only bail is accepted while challenges are disabled; Slam must be enabled.
 bool request(Action action) noexcept;
 bool set_visual_options(const VisualOptions& options) noexcept;
 // Queues one preview using the current applied sound settings.

@@ -822,17 +822,47 @@ void saved_personal_bests() {
     check(!decode_personal_best("{}",map,config) && !decode_personal_best(std::string(4097,' '),map,config),
         "Malformed and oversized best records are rejected");
 }
+void shared_damage_thresholds() {
+    Config config; config.scoring.bruise_threshold=100; config.scoring.fracture_threshold=200;
+    for (std::size_t region=0;region<region_count;++region) {
+        Challenge challenge; auto frame=skater(); frame.body_count=1; frame.dt=.1f;
+        frame.bodies[0].region=static_cast<Region>(region);
+        const auto bone=20+region; frame.bodies[0].joint=static_cast<int>(bone);
+        // Horizontal contacts isolate damage from the model's gravity correction.
+        frame.bodies[0].normal={1,0,0};
+        const auto release=[&] {
+            frame.bodies[0].contact=false; frame.bodies[0].velocity={-10,0,0}; challenge.step(frame);
+        };
+        const auto collide=[&] {
+            frame.bailed=true; frame.grounded=true;
+            frame.bodies[0].contact=true; frame.bodies[0].velocity={}; challenge.step(frame);
+        };
+        check(challenge.begin(frame,config),"Every body region accepts the shared damage thresholds");
+        release(); collide();
+        check(is_bruised(challenge.result().bone_injuries[bone],config.scoring) &&
+            !challenge.result().bone_injuries[bone].fractured && !challenge.result().injuries[region].fractured,
+            "Head and other bones bruise equally below the shared fracture threshold");
+        // Separate the contacts and let the region's scoring cooldown expire.
+        for (unsigned i=0;i<3;++i) release();
+        collide();
+        check(challenge.result().bone_injuries[bone].severity==200 &&
+            challenge.result().bone_injuries[bone].fractured && challenge.result().injuries[region].fractured,
+            "Every bone and body region fractures at exactly the same accumulated damage threshold");
+    }
+}
 void saved_damage_thresholds() {
     const Config defaults;
     constexpr std::string_view legacy=R"({"version":1,"kind":0,"target":5000,"rules":[10,500,100,50,25,0.25,1.5,160,225]})";
     check(decode_config(legacy)==std::optional(defaults) && encode_config(defaults).find("bruiseThreshold")==std::string::npos,
-        "Older scoring saves retain any-damage bruises and their original personal-best identity");
+        "Older scoring saves retain any-damage bruises and use the other-bone fracture threshold for every bone");
     Config configured; configured.scoring.bruise_threshold=120;
-    configured.scoring.head_fracture=500; configured.scoring.limb_fracture=800;
+    configured.scoring.fracture_threshold=800;
     check(decode_config(encode_config(configured))==std::optional(configured),
-        "Bruise, head fracture and other fracture thresholds survive saved configuration");
+        "General bruise and fracture thresholds survive saved configuration");
+    check(decode_config(R"({"version":1,"kind":0,"target":5000,"bruiseThreshold":120,"rules":[10,500,100,50,25,0.25,1.5,500,800]})")==std::optional(configured),
+        "Legacy fracture thresholds migrate to the saved other-bone value while preserving the bruise threshold");
     const auto encoded=encode_config(configured);
-    for (const auto bad_value : {"true","-1","10001","600"}) {
+    for (const auto bad_value : {"true","-1","10001","801"}) {
         auto bad=encoded;
         const auto at=bad.find("\"bruiseThreshold\":120");
         bad.replace(at,std::string_view("\"bruiseThreshold\":120").size(),std::string("\"bruiseThreshold\":")+bad_value);
@@ -915,6 +945,7 @@ int main() {
     lifecycle(); contact_scoring(); same_region(); invalidation(); free_fall_and_rest(); recovery_and_timeout(); native_regressions(); camera_timing(); rendered_pose(); mesh_skinning(); rendered_world_skinning(); raster_camera_input(); render_root_timing(); mesh_streams(); individual_bone_hits(); pose_publication_order(); challenge_progression(); saved_personal_bests();
     personal_best_transactions();
     saved_damage_thresholds();
+    shared_damage_thresholds();
     varied_fracture_planes(); rapid_head_hits_and_contact_episodes(); contact_record_selection(); rotational_contacts(); impacts_before_bail(); board_landing_load();
     if (failures) return 1;
     std::cout << "Slam Challenge scoring and lifecycle checks passed.\n";

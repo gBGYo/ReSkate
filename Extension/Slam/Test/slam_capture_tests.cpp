@@ -58,8 +58,11 @@ slam::Snapshot scene() {
     // frame already validated by the export caller must remain unchanged.
     pose->at_ms=GetTickCount64()-1000; value.mesh_pose=pose;
     value.replay_active=value.replay_available=true; value.visuals.replay=true;
+    value.visuals.normal_play=true;
     value.visuals.opacity=.5f; value.visuals.reduced_effects=true;
+    value.visuals.visibility=slam::XrayVisibility::impact;
     value.replay_result.phase=slam::Phase::bailed; value.replay_time_ms=1001;
+    value.replay_events.latest_impact_ms=1;
     return value;
 }
 std::vector<std::uint8_t> background(const replay_export::BgraFrame& frame) {
@@ -153,10 +156,29 @@ void gpu() {
         check(overlay::detail::capture_slam_mesh(device.Get(),value,video,frame) && video==before,
             "Replay bone filters also apply to encoded video");
         value.visuals.only_fractured=false;
+        value.replay_events.latest_impact_ms=0;
+        check(!overlay::detail::capture_slam_mesh(device.Get(),value,video,frame) && video==before,
+            "Replay capture stays unchanged before the first impact");
+        value.replay_events.latest_impact_ms=1;
+        value.replay_time_ms=1501;
+        check(!overlay::detail::capture_slam_mesh(device.Get(),value,video,frame) && video==before,
+            "Replay skeleton fades out at the configured impact duration");
+        value.visuals.visibility=slam::XrayVisibility::always;
+        check(overlay::detail::capture_slam_mesh(device.Get(),value,video,frame) && video!=before,
+            "Always keeps the replay skeleton visible after impact fading would expire");
+        video=before; value.visuals.visibility=slam::XrayVisibility::off;
+        check(!overlay::detail::capture_slam_mesh(device.Get(),value,video,frame) && video==before,
+            "Off leaves replay video unchanged while Slam remains enabled");
+        value.visuals.visibility=slam::XrayVisibility::impact;
+        value.replay_time_ms=1001;
         value.visuals.replay=false;
         check(!overlay::detail::capture_slam_mesh(device.Get(),value,video,frame) && video==before,
             "Disabling replay X-rays leaves encoded video unchanged");
         value.visuals.replay=true;
+        value.visuals.normal_play=false;
+        check(!overlay::detail::capture_slam_mesh(device.Get(),value,video,frame) && video==before,
+            "Disabling Slam leaves encoded video unchanged even when replay X-rays are enabled");
+        value.visuals.normal_play=true;
     }
     ComPtr<ID3D12InfoQueue> info;
     if (SUCCEEDED(device.As(&info))) {

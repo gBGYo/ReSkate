@@ -8,15 +8,15 @@
 namespace dingosdk::slam {
 const char* xray_visibility_name(XrayVisibility value) noexcept {
     switch (value) {
-    case XrayVisibility::attempt: return "During attempts";
-    case XrayVisibility::bail: return "After bailing";
+    case XrayVisibility::always: return "Always";
     case XrayVisibility::impact: return "After impacts";
     case XrayVisibility::off: return "Off";
     default: return "Unknown";
     }
 }
 bool valid_visual_options(const VisualOptions& v) noexcept {
-    return v.visibility<XrayVisibility::count && std::isfinite(v.opacity) && v.opacity>=.1f && v.opacity<=1 &&
+    return (v.visibility==XrayVisibility::always || v.visibility==XrayVisibility::impact || v.visibility==XrayVisibility::off) &&
+        std::isfinite(v.opacity) && v.opacity>=.1f && v.opacity<=1 &&
         std::isfinite(v.flash_strength) && v.flash_strength>=0 && v.flash_strength<=1 &&
         std::isfinite(v.impact_duration_s) && v.impact_duration_s>=.3f && v.impact_duration_s<=5 &&
         std::isfinite(v.sound_volume) && v.sound_volume>=0 && v.sound_volume<=1 &&
@@ -59,9 +59,11 @@ std::optional<VisualOptions> decode_visual_options(std::string_view text) noexce
             !doc.contains("flash") || !doc.contains("impactSeconds") || !doc.contains("reduced") ||
             !doc.at("reduced").is_boolean()) return {};
         const auto visibility=doc.at("visibility").get<std::int64_t>();
-        if (visibility<0 || visibility>=static_cast<std::int64_t>(XrayVisibility::count)) return {};
+        if (visibility<0 || visibility>3) return {};
         VisualOptions v;
-        v.visibility=static_cast<XrayVisibility>(visibility); v.reduced_effects=doc.at("reduced").get<bool>();
+        // Only the removed After bailing choice migrates to After impacts.
+        v.visibility=visibility==1 ? XrayVisibility::impact : static_cast<XrayVisibility>(visibility);
+        v.reduced_effects=doc.at("reduced").get<bool>();
         // Existing v1 saves predate the optional contact-only display.
         if (doc.contains("onlyImpacted")) {
             if (!doc.at("onlyImpacted").is_boolean()) return {};
@@ -172,8 +174,6 @@ VisualAppearance visual_appearance(const VisualOptions& options,const Result& re
     VisualAppearance next;
     if (!valid_visual_options(options) || first_person || result.cancelled || (!normal_play && result.phase==Phase::ready) ||
         options.visibility==XrayVisibility::off) return next;
-    const bool bailed=result.phase==Phase::bailed || result.phase==Phase::settled || result.phase==Phase::results;
-    if (options.visibility==XrayVisibility::bail && !bailed) return next;
     next.opacity=options.opacity;
     if (options.visibility==XrayVisibility::impact) {
         const float elapsed=age(events.latest_impact_ms,now);

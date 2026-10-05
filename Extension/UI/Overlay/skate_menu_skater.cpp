@@ -17,12 +17,12 @@ float trailing_width(const char* label) {
 }
 void camera_controls(SkateMenu& menu, const Model& model, const CallbacksV3& callbacks) {
     const auto& debug = model.debug;
-    begin_card(menu,"normal-xray","X-RAY");
+    begin_card(menu,"slam-mode","SLAM");
     const auto xray=dingosdk::slam::snapshot();
     auto visuals=xray.visuals;
-    if (toggle_row(menu,"X-ray in normal play","Show the skeleton without starting a Slam attempt.",visuals.normal_play,xray.visual_options_ready))
+    if (toggle_row(menu,"Slam","Enable Slam during normal play, including X-ray, impact effects and manual bail.",visuals.normal_play,xray.visual_options_ready))
         (void)dingosdk::slam::set_visual_options(visuals);
-    note("Opacity, visibility and impacted bones: Skater > Slam > X-ray. Falls reset automatically after recovery.");
+    note("Configure bones, impact effects and bail controls in Skater > Slam. Falls reset automatically after recovery.");
     if (visuals.normal_play && !xray.normal_xray_available) note(xray.availability.c_str());
     if (xray.first_person && visuals.normal_play) note("The skeleton is hidden while First person is enabled.");
     end_card();
@@ -153,12 +153,16 @@ void skater_page(SkateMenu& menu, const Model& model, const CallbacksV3& callbac
     else if (menu.skater_tab == 1) movement_controls(menu, model, callbacks);
     else {
         const auto value = dingosdk::slam::snapshot();
-        slam_challenge_cards(menu,value);
+        if (!value.visuals.normal_play) {
+            menu.slam_bind_capture=0;
+            note("Enable Slam in Skater > Camera to use these settings.");
+        }
+        ImGui::BeginDisabled(!value.visuals.normal_play);
         begin_card(menu,"slam-controls","BAIL CONTROLS");
         auto controls=value.bail_controls;
         bool controls_changed=false;
         ImGui::BeginDisabled(!value.bail_controls_ready);
-        controls_changed|=toggle_row(menu,"Manual bail","Trigger a native wipeout during attempts or normal-play X-ray.",controls.enabled);
+        controls_changed|=toggle_row(menu,"Manual bail","Trigger a native wipeout while Slam is enabled.",controls.enabled);
         ControllerInput controller;
         DingoSDKOverlayReadControllerInput(&controller,true);
         DWORD foreground_process{};
@@ -220,19 +224,16 @@ void skater_page(SkateMenu& menu, const Model& model, const CallbacksV3& callbac
         auto visuals=value.visuals;
         bool changed=false,preview_sound=false;
         ImGui::BeginDisabled(!value.visual_options_ready);
-        if (toggle_row(menu,"X-ray in normal play","Keep X-ray active without attempts or the Slam score HUD.",visuals.normal_play,value.visual_options_ready)) changed=true;
         if (toggle_row(menu,"X-ray in replay","Show bones in the replay editor, with injuries from this session's recording.",visuals.replay,value.visual_options_ready)) changed=true;
-        const auto visibility_label=[&](dingosdk::slam::XrayVisibility mode) {
-            return visuals.normal_play && mode==dingosdk::slam::XrayVisibility::attempt ? "Always" : dingosdk::slam::xray_visibility_name(mode);
-        };
-        field(menu,"Show skeleton");
-        ImGui::SetNextItemWidth(-FLT_MIN);
-        if (ImGui::BeginCombo("##slam-xray-visibility",visibility_label(visuals.visibility))) {
-            for (unsigned i=0;i<static_cast<unsigned>(dingosdk::slam::XrayVisibility::count);++i) {
-                const auto mode=static_cast<dingosdk::slam::XrayVisibility>(i);
-                if (ImGui::Selectable(visibility_label(mode),visuals.visibility==mode)) {
+        field(menu,"Show skeleton"); ImGui::SetNextItemWidth(-FLT_MIN);
+        if (ImGui::BeginCombo("##slam-xray-visibility",dingosdk::slam::xray_visibility_name(visuals.visibility))) {
+            for (const auto mode : {dingosdk::slam::XrayVisibility::always,dingosdk::slam::XrayVisibility::impact,
+                dingosdk::slam::XrayVisibility::off}) {
+                const bool selected=visuals.visibility==mode;
+                if (ImGui::Selectable(dingosdk::slam::xray_visibility_name(mode),selected) && !selected) {
                     visuals.visibility=mode; changed=true;
                 }
+                if (selected) ImGui::SetItemDefaultFocus();
             }
             ImGui::EndCombo();
         }
@@ -240,19 +241,22 @@ void skater_page(SkateMenu& menu, const Model& model, const CallbacksV3& callbac
         auto& injury_rules=injury_config.scoring;
         bool thresholds_changed=false;
         ImGui::BeginDisabled(!value.challenge_options_ready);
-        field(menu,"Bruise damage threshold"); ImGui::SetNextItemWidth(-FLT_MIN);
-        thresholds_changed|=ImGui::SliderFloat("##slam-bruise-threshold",&injury_rules.bruise_threshold,0.f,
-            std::min(injury_rules.head_fracture,injury_rules.limb_fracture),"%.0f",ImGuiSliderFlags_AlwaysClamp);
-        const float fracture_min=std::max(10.f,injury_rules.bruise_threshold);
-        field(menu,"Head fracture damage threshold"); ImGui::SetNextItemWidth(-FLT_MIN);
-        thresholds_changed|=ImGui::SliderFloat("##slam-head-fracture-threshold",&injury_rules.head_fracture,fracture_min,10000.f,
-            "%.0f",ImGuiSliderFlags_AlwaysClamp|ImGuiSliderFlags_Logarithmic);
-        field(menu,"Other bone fracture damage threshold"); ImGui::SetNextItemWidth(-FLT_MIN);
-        thresholds_changed|=ImGui::SliderFloat("##slam-limb-fracture-threshold",&injury_rules.limb_fracture,fracture_min,10000.f,
-            "%.0f",ImGuiSliderFlags_AlwaysClamp|ImGuiSliderFlags_Logarithmic);
+        // Fixed ranges keep one handle from moving when the other value changes.
+        field(menu,"Bruise damage threshold","Cannot exceed the fracture damage threshold."); ImGui::SetNextItemWidth(-FLT_MIN);
+        if (ImGui::SliderFloat("##slam-bruise-threshold",&injury_rules.bruise_threshold,0.f,10000.f,
+            "%.0f",ImGuiSliderFlags_AlwaysClamp|ImGuiSliderFlags_Logarithmic)) {
+            injury_rules.bruise_threshold=std::min(injury_rules.bruise_threshold,injury_rules.fracture_threshold);
+            thresholds_changed=true;
+        }
+        field(menu,"Fracture damage threshold","Cannot be lower than the bruise damage threshold."); ImGui::SetNextItemWidth(-FLT_MIN);
+        if (ImGui::SliderFloat("##slam-fracture-threshold",&injury_rules.fracture_threshold,10.f,10000.f,
+            "%.0f",ImGuiSliderFlags_AlwaysClamp|ImGuiSliderFlags_Logarithmic)) {
+            injury_rules.fracture_threshold=std::max(injury_rules.fracture_threshold,injury_rules.bruise_threshold);
+            thresholds_changed=true;
+        }
         ImGui::EndDisabled();
         if (thresholds_changed) (void)dingosdk::slam::set_challenge_config(injury_config);
-        note("Higher thresholds require more accumulated damage. Changes apply to new attempts and the next normal-play fall.");
+        note("Higher thresholds require more accumulated damage. Changes apply to the next fall.");
         ImGui::BeginDisabled(visuals.visibility==dingosdk::slam::XrayVisibility::off);
         field(menu,"Opacity"); ImGui::SetNextItemWidth(-FLT_MIN);
         changed|=ImGui::SliderFloat("##slam-xray-opacity",&visuals.opacity,.1f,1.f,"%.2f",ImGuiSliderFlags_AlwaysClamp);
@@ -268,6 +272,7 @@ void skater_page(SkateMenu& menu, const Model& model, const CallbacksV3& callbac
         if (visuals.visibility==dingosdk::slam::XrayVisibility::impact) {
             field(menu,"Visible after impact"); ImGui::SetNextItemWidth(-FLT_MIN);
             changed|=ImGui::SliderFloat("##slam-xray-seconds",&visuals.impact_duration_s,.3f,5.f,"%.1f seconds",ImGuiSliderFlags_AlwaysClamp);
+            note("Each hit refreshes the duration. The skeleton fades out even after recovery.");
         }
         ImGui::EndDisabled();
         ImGui::EndDisabled();
@@ -339,14 +344,16 @@ void skater_page(SkateMenu& menu, const Model& model, const CallbacksV3& callbac
         changed|=ImGui::SliderFloat("##slam-pass-out-seconds",&visuals.pass_out_seconds,.5f,4.f,"%.2f seconds",ImGuiSliderFlags_AlwaysClamp);
         field(menu,"Pass-out impact threshold"); ImGui::SetNextItemWidth(-FLT_MIN);
         changed|=ImGui::SliderFloat("##slam-pass-out-severity",&visuals.pass_out_severity,25.f,2000.f,"%.0f",ImGuiSliderFlags_AlwaysClamp);
-        if (toggle_row(menu,"Fade Slam HUD","Fade the score interface with the pass-out effect.",visuals.pass_out_hud,value.visual_options_ready)) changed=true;
         ImGui::EndDisabled();
         ImGui::EndDisabled();
-        if (ImGui::Button("Reset visual and sound settings",ImVec2(-FLT_MIN,0))) {visuals={}; changed=true;}
+        if (ImGui::Button("Reset visual and sound settings",ImVec2(-FLT_MIN,0))) {
+            const bool enabled=visuals.normal_play;
+            visuals={}; visuals.normal_play=enabled; changed=true;
+        }
         ImGui::EndDisabled();
         if (changed) (void)dingosdk::slam::set_visual_options(visuals);
         if (preview_sound) (void)dingosdk::slam::preview_fracture_sound();
-        if (visuals.normal_play) note("Normal-play X-ray follows every fall and clears injury highlights after recovery. No attempt or reset is needed.");
+        note("Slam follows every fall and clears injury highlights after recovery.");
         if (value.first_person) note("The skeleton is hidden while First person is enabled.");
         note("Ivory bones with blue uninjured patches, orange bruises and red fractures. X-ray settings are saved automatically.");
         if (!value.visual_save_status.empty()) note(value.visual_save_status.c_str());
@@ -368,6 +375,7 @@ void skater_page(SkateMenu& menu, const Model& model, const CallbacksV3& callbac
             note(value.availability.c_str());
             ImGui::TreePop();
         }
+        ImGui::EndDisabled();
     }
     ImGui::EndChild();
     ImGui::PopID();

@@ -12,8 +12,8 @@ Json config_json(const Config& c) {
     const auto& s = c.scoring;
     auto doc=Json{{"version",1}, {"kind",static_cast<unsigned>(c.kind)}, {"target",c.target},
         {"rules",Json::array({s.impact_rate,s.fracture_bonus,s.fall_rate,s.airtime_rate,s.slide_rate,
-            s.chain_step,s.chain_window_s,s.head_fracture,s.limb_fracture})}};
-    // Omitting the legacy default preserves existing personal-best keys.
+            s.chain_step,s.chain_window_s,s.fracture_threshold})}};
+    // Keep the legacy representation of the default bruise threshold.
     if (s.bruise_threshold>0) doc["bruiseThreshold"]=s.bruise_threshold;
     return doc;
 }
@@ -26,18 +26,26 @@ std::optional<Config> read_config(const Json& doc) {
         !doc.contains("kind") || !bounded_integer(doc.at("kind"),static_cast<unsigned>(ChallengeKind::count)-1) ||
         !doc.contains("target") || !doc.at("target").is_number() || !doc.contains("rules")) return {};
     const auto& rules = doc.at("rules");
-    if (!rules.is_array() || rules.size() != 9) return {};
+    if (!rules.is_array() || (rules.size()!=8 && rules.size()!=9)) return {};
+    // Legacy saves ended with separate head and other-bone thresholds. Keep
+    // the other-bone value as the shared threshold when upgrading.
+    if (rules.size()==9) {
+        if (!rules.at(7).is_number()) return {};
+        const double head=rules.at(7).get<double>();
+        if (!std::isfinite(head) || head<10 || head>10000) return {};
+    }
     Config c;
     c.kind = static_cast<ChallengeKind>(doc.at("kind").get<unsigned>());
     const double target = doc.at("target").get<double>();
     if (!std::isfinite(target) || target < 1 || target > 1000000) return {};
     c.target = static_cast<float>(target);
-    std::array<float*,9> fields{&c.scoring.impact_rate,&c.scoring.fracture_bonus,&c.scoring.fall_rate,
+    std::array<float*,8> fields{&c.scoring.impact_rate,&c.scoring.fracture_bonus,&c.scoring.fall_rate,
         &c.scoring.airtime_rate,&c.scoring.slide_rate,&c.scoring.chain_step,&c.scoring.chain_window_s,
-        &c.scoring.head_fracture,&c.scoring.limb_fracture};
+        &c.scoring.fracture_threshold};
     for (std::size_t i=0; i<fields.size(); ++i) {
-        if (!rules.at(i).is_number()) return {};
-        const double value = rules.at(i).get<double>();
+        const auto index=i==7 ? rules.size()-1 : i;
+        if (!rules.at(index).is_number()) return {};
+        const double value = rules.at(index).get<double>();
         if (!std::isfinite(value) || value < 0 || value > 10000) return {};
         *fields[i] = static_cast<float>(value);
     }

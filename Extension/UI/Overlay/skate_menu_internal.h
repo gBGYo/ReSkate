@@ -3,8 +3,6 @@
 #include <initializer_list>
 #include <string>
 
-namespace dingosdk::slam { struct Snapshot; }
-
 namespace dingosdk::overlay::menu {
 // The menu chrome is laid out in pixels; px() applies the user's menu scale to
 // one of those measurements. Only valid while the menu is drawing.
@@ -53,7 +51,6 @@ void map_page(SkateMenu&, const Model&, const CallbacksV3&);
 void world_page(SkateMenu&, const Model&, const CallbacksV3&);
 void build_page(SkateMenu&, const Model&, const CallbacksV3&);
 void skater_page(SkateMenu&, const Model&, const CallbacksV3&);
-void slam_challenge_cards(SkateMenu&, const slam::Snapshot&);
 void settings_page(SkateMenu&, const Model&, const CallbacksV3&);
 // Settings > Post FX (skate_menu_world.cpp).
 void graphics_page(SkateMenu&, const Model&, const CallbacksV3&);

@@ -92,10 +92,9 @@ bool valid_config(const Config& config) noexcept {
         if (!std::isfinite(value) || value < 0 || value > 10000) return false;
     return std::isfinite(s.chain_step) && s.chain_step >= 0 && s.chain_step <= 1 &&
         std::isfinite(s.chain_window_s) && s.chain_window_s >= .25f && s.chain_window_s <= 5 &&
-        std::isfinite(s.head_fracture) && s.head_fracture >= 10 && s.head_fracture <= 10000 &&
-        std::isfinite(s.limb_fracture) && s.limb_fracture >= 10 && s.limb_fracture <= 10000 &&
+        std::isfinite(s.fracture_threshold) && s.fracture_threshold >= 10 && s.fracture_threshold <= 10000 &&
         std::isfinite(s.bruise_threshold) && s.bruise_threshold>=0 &&
-        s.bruise_threshold<=std::min(s.head_fracture,s.limb_fracture);
+        s.bruise_threshold<=s.fracture_threshold;
 }
 bool is_bruised(const Injury& injury,const ScoreRules& rules) noexcept {
     return !injury.fractured && injury.severity>0 && injury.severity>=rules.bruise_threshold;
@@ -338,7 +337,6 @@ void Challenge::step(const Frame& frame) {
         // velocity. It is not a claim of physical energy or real bone damage.
         std::array<float, region_count> severity{};
         std::array<float, injury_bone_count> bone_severity{};
-        std::array<float, injury_bone_count> bone_threshold{};
         if (previous_valid_ && previous_.body_count == frame.body_count) {
             for (std::size_t i = 0; i < frame.body_count; ++i) {
                 const auto& body = frame.bodies[i];
@@ -352,8 +350,6 @@ void Challenge::step(const Frame& frame) {
                 if (injury_joint>=0) {
                     const auto bone=static_cast<std::size_t>(injury_joint);
                     bone_severity[bone]=std::max(bone_severity[bone],hit);
-                    const auto& rules=result_.config.scoring;
-                    bone_threshold[bone]=body.region==Region::head ? rules.head_fracture : rules.limb_fracture;
                 }
             }
         }
@@ -363,7 +359,7 @@ void Challenge::step(const Frame& frame) {
             if (bone_severity[bone]<=0) continue;
             auto& injury=result_.bone_injuries[bone];
             injury.severity+=bone_severity[bone]; injury.flash=.65f;
-            injury.fractured=injury.severity>=bone_threshold[bone];
+            injury.fractured=injury.severity>=result_.config.scoring.fracture_threshold;
         }
         for (std::size_t r = 0; r < region_count; ++r) {
             if (severity[r] <= 0 || cooldown_[r] > 0) continue;
@@ -381,8 +377,7 @@ void Challenge::step(const Frame& frame) {
             result_.impact_points += base_points;
             const float multiplier = std::min(3.f, static_cast<float>(result_.current_chain-1)*rules.chain_step);
             result_.chain_points += static_cast<std::uint64_t>(std::llround(static_cast<double>(base_points)*multiplier));
-            const float threshold = r == static_cast<std::size_t>(Region::head) ? rules.head_fracture : rules.limb_fracture;
-            if (!injury.fractured && injury.severity >= threshold) {
+            if (!injury.fractured && injury.severity >= rules.fracture_threshold) {
                 injury.fractured = true;
                 ++result_.fractures;
                 result_.fracture_points += static_cast<std::uint64_t>(std::llround(rules.fracture_bonus));

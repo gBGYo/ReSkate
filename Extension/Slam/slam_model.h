@@ -16,7 +16,7 @@ struct ScoreRules {
     float impact_rate = 10, fracture_bonus = 500;
     float fall_rate = 100, airtime_rate = 50, slide_rate = 25;
     float chain_step = .25f, chain_window_s = 1.5f;
-    float head_fracture = 160, limb_fracture = 225;
+    float fracture_threshold = 225;
     float bruise_threshold{};
     bool operator==(const ScoreRules&) const = default;
 };

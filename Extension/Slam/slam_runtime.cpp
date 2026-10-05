@@ -741,9 +741,9 @@ void publish_result(State& s) {
     const bool impact_visibility=s.published.visuals.visibility==XrayVisibility::impact;
     s.published.normal_xray_result=impact_visibility ? s.normal_xray.impact_result() : s.normal_xray.result();
     s.published.normal_xray_events=impact_visibility ? s.normal_xray.impact_events() : s.normal_xray.events();
-    s.draw_active.store(s.published.visible ||
-        (s.published.visuals.normal_play && s.published.normal_xray_available) ||
-        (s.published.visuals.replay && (s.published.replay_available || s.published.normal_xray_available)),std::memory_order_release);
+    s.draw_active.store(s.published.visuals.normal_play &&
+        (s.published.normal_xray_available || (s.published.visuals.replay && s.published.replay_available)),
+        std::memory_order_release);
 }
 void unwatch(State& s) {
     s.rig.store(0, std::memory_order_release);
@@ -764,10 +764,12 @@ void unwatch(State& s) {
 }
 }
 bool request(Action action) noexcept {
+    // Challenge attempts and retries are disabled; normal play is the only mode.
+    if (action!=Action::bail) return false;
     try {
         auto& s = state();
         std::lock_guard lock(s.mutex);
-        if (s.pending) return false;
+        if (!s.published.visuals.normal_play || s.pending) return false;
         s.pending = action;
         return true;
     } catch (...) { return false; }
@@ -840,6 +842,12 @@ bool set_visual_options(const VisualOptions& options) noexcept {
         auto& s=state(); std::lock_guard lock(s.mutex);
         if (!s.published.visual_options_ready) return false;
         if (s.published.visuals.normal_play!=options.normal_play) s.normal_xray.reset();
+        if (!options.normal_play) {
+            s.pending.reset(); s.audio_preview_requested=false;
+            s.published.pass_out={};
+            s.effects_cancel_requested.store(true,std::memory_order_release);
+            cancel_manual_bail();
+        }
         s.published.visuals=options;
         publish_result(s);
         // Dragging a slider updates the visual immediately; save only after
@@ -852,7 +860,7 @@ bool set_visual_options(const VisualOptions& options) noexcept {
 bool preview_fracture_sound() noexcept {
     try {
         auto& s=state(); std::lock_guard lock(s.mutex);
-        if (!s.published.visual_options_ready || !s.published.visuals.fracture_sound ||
+        if (!s.published.visual_options_ready || !s.published.visuals.normal_play || !s.published.visuals.fracture_sound ||
             s.published.visuals.fracture_volume<=0) return false;
         s.audio_preview_requested=true;
         s.published.impact_audio_status="Sound preview queued...";
@@ -1046,8 +1054,8 @@ void tick(std::uintptr_t base, std::uintptr_t client, std::uintptr_t entity, boo
                 if (decoded) {
                     s.published.visuals=*decoded; s.published.visual_save_status="Saved X-ray settings restored.";
                     logging::log(logging::Level::info,logging::Channel::skater,
-                        "Slam X-ray settings restored: visibility={}, opacity={:.2f}, reduced effects={}, duration={:.1f}s, normal play={}.",
-                        xray_visibility_name(decoded->visibility),decoded->opacity,decoded->reduced_effects,decoded->impact_duration_s,decoded->normal_play);
+                        "Slam X-ray settings restored: opacity={:.2f}, reduced effects={}, duration={:.1f}s, enabled={}.",
+                        decoded->opacity,decoded->reduced_effects,decoded->impact_duration_s,decoded->normal_play);
                 }
                 else s.published.visual_save_status="Saved X-ray settings could not be read; using defaults.";
             }
@@ -1055,7 +1063,7 @@ void tick(std::uintptr_t base, std::uintptr_t client, std::uintptr_t entity, boo
         }
         if (s.normal_play_observed!=s.published.visuals.normal_play) {
             s.normal_play_observed=s.published.visuals.normal_play;
-            logging::log(logging::Level::info,logging::Channel::skater,"Normal-play X-ray {}.",s.normal_play_observed ? "enabled" : "disabled");
+            logging::log(logging::Level::info,logging::Channel::skater,"Slam {}.",s.normal_play_observed ? "enabled" : "disabled");
         }
         if ((ready || replay_owned) && s.visuals_save_at && GetTickCount64()>=s.visuals_save_at) {
             s.visuals_save_at=0;
@@ -1069,13 +1077,13 @@ void tick(std::uintptr_t base, std::uintptr_t client, std::uintptr_t entity, boo
         }
         if (!s.contracts_checked && no_bail_available()) { s.contracts_ok = contracts(base); s.contracts_checked = true; }
         const char* visual_issue = replaying ? "Replay editor is open; gameplay Slam controls are suspended." :
-            noclip ? "Turn off Noclip before starting an attempt." :
-            editor ? "Exit the park editor before starting an attempt." :
+            noclip ? "Turn off Noclip to use Slam." :
+            editor ? "Exit the park editor to use Slam." :
             !s.contracts_ok ? "Slam telemetry is unavailable for this game build." :
             !owned ? "Waiting for a local skater." :
             !s.pose_hooks_ok ? "Slam skeleton overlay is unavailable for this game build." : nullptr;
         const bool changed = s.watch.owner.entity && (owner != s.watch.owner || map != s.map);
-        const char* issue = visual_issue ? visual_issue : no_bail ? "Turn off No Bail before starting an attempt." : nullptr;
+        const char* issue = visual_issue ? visual_issue : no_bail ? "Turn off No Bail to use Manual bail." : nullptr;
         if (visual_issue || changed) {
             s.challenge.cancel(visual_issue ? visual_issue : "Attempt cancelled: the skater or map changed.");
             if (!replaying || !was_replay || !replay_owned || !s.watch.replay ||
@@ -1190,10 +1198,9 @@ void tick(std::uintptr_t base, std::uintptr_t client, std::uintptr_t entity, boo
         s.published.bail_controller_conflict=overlapping_combos(controls.controller_combo,bindings.noclip_combo) ||
             overlapping_combos(controls.controller_combo,bindings.forward_velocity_combo) ||
             overlapping_combos(controls.controller_combo,bindings.up_velocity_combo);
-        const bool bail_mode=s.published.bail_controls_ready && controls.enabled &&
-            (s.challenge.running() || s.published.visuals.normal_play);
+        const bool bail_mode=s.published.bail_controls_ready && controls.enabled && s.published.visuals.normal_play;
         const char* bail_issue=s.retry.active() ? "Wait for retry to return to the saved start." :
-            !bail_mode ? "Start an attempt or enable normal-play X-ray and Manual bail." :
+            !bail_mode ? "Enable Slam in Skater > Camera and Manual bail in Skater > Slam." :
             issue ? issue : changed ? "Waiting for the current skater and map." :
             first_person ? "Turn off First person before using Manual bail." :
             s.effects_suspended.load(std::memory_order_acquire) ? "Waiting for loading to finish." :
@@ -1230,7 +1237,7 @@ void tick(std::uintptr_t base, std::uintptr_t client, std::uintptr_t entity, boo
         s.published.manual_bails_queued=manual.queued;
         s.published.manual_bails_selected=manual.selected;
         s.published.manual_bails_published=manual.published;
-        if ((s.published.visible || s.published.visuals.normal_play || s.published.visuals.replay) &&
+        if (s.published.visuals.normal_play &&
             !s.mesh_started && (owned || replay_owned)) {
             s.mesh_started=true;
             s.published.mesh_status="Loading Dem Bones from the installed game...";
@@ -1262,7 +1269,7 @@ void tick(std::uintptr_t base, std::uintptr_t client, std::uintptr_t entity, boo
             s.challenge.cancel("Attempt cancelled: physics telemetry stopped.");
         if (GetTickCount64()-s.last_at>500) s.normal_xray.reset();
         publish_result(s);
-        if (owned && clock && !clock->playback && s.published.visuals.replay && s.last.valid && GetTickCount64()-s.last_at<250) {
+        if (owned && clock && !clock->playback && s.published.visuals.normal_play && s.published.visuals.replay && s.last.valid && GetTickCount64()-s.last_at<250) {
             s.history_entity=owner.entity;
             const bool attempt=s.published.xray_context_valid;
             s.replay_history.record(clock->time,attempt ? s.published.result : s.published.normal_xray_result,
@@ -1275,7 +1282,7 @@ void tick(std::uintptr_t base, std::uintptr_t client, std::uintptr_t entity, boo
         const bool effects_allowed=!visual_issue && !s.effects_suspended.load(std::memory_order_acquire) &&
             !s.retry.active() &&
             !s.effects_cancel_requested.exchange(false,std::memory_order_acq_rel) && GetTickCount64()-s.last_at<250 &&
-            (effects_options.normal_play || (s.published.visible && s.published.xray_context_valid));
+            effects_options.normal_play;
         const bool feedback_allowed=effects_allowed && s.last.valid && s.last.bailed;
         const bool camera_allowed=feedback_allowed && !first_person && gameplay_focused();
         s.camera_impact=s.camera_pulse.step(effects_options,effects_events,GetTickCount64(),camera_allowed);
@@ -1401,7 +1408,7 @@ void observe_skeleton(std::uintptr_t rig, float seconds, bool wipeout) noexcept 
         publish_attempt_availability(s.published, s.attempt_issue, frame.valid, frame.bailed);
         const auto previous_phase = s.challenge.result().phase;
         s.challenge.step(frame);
-        if (s.published.visuals.normal_play || s.published.visuals.replay) {
+        if (s.published.visuals.normal_play) {
             const auto previous_impacts=s.normal_xray.result().impacts;
             s.normal_xray.step(frame,GetTickCount64(),s.published.selected_config.scoring);
             if (s.normal_xray.result().impacts>previous_impacts)
