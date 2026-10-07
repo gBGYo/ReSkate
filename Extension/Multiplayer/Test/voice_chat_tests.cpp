@@ -174,7 +174,7 @@ int main() try {
     for (int i = 0; i < 80; ++i) check(budget.accept(1000000, 32), "Normal voice cadence rejected");
     check(!budget.accept(1000000, 32) && budget.accept(2000000, 32), "Voice rate limit failed");
     budget = {};
-    for (int i = 0; i < 6; ++i) check(budget.accept(1000000, max_voice_bytes), "Voice byte budget rejected early");
+    for (int i = 0; i < 2; ++i) check(budget.accept(1000000, max_voice_bytes), "Voice byte budget rejected early");
     check(!budget.accept(1000000, 1), "Voice byte budget exceeded");
     VoiceSettings settings;
     check(settings.valid() && !settings.enabled && !settings.open_mic && settings.push_to_talk == 'V', "Unsafe microphone default");

@@ -122,6 +122,35 @@ bool list_row(const char* id, float width, float height, bool ticked) {
     return pressed;
 }
 
+bool toggle(const char* id, bool* on) {
+    const ImVec2 size(S(42), S(22));
+    const ImVec2 start = ImGui::GetCursorScreenPos();
+    const bool pressed = ImGui::InvisibleButton(id, size);
+    if (pressed) *on = !*on;
+    const bool hovered = ImGui::IsItemHovered();
+    if (hovered) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+    auto* draw = ImGui::GetWindowDrawList();
+    const float radius = size.y * 0.5f;
+    draw->AddRectFilled(start, ImVec2(start.x + size.x, start.y + size.y),
+        *on ? color::blue : rgba(255, 255, 255, hovered ? 0.2f : 0.13f), radius);
+    draw->AddCircleFilled(ImVec2(start.x + (*on ? size.x - radius : radius), start.y + radius), radius - S(3),
+        *on ? color::ink : rgba(196, 202, 212));
+    return pressed;
+}
+
+bool more_button(const char* id, float size) {
+    const ImVec2 start = ImGui::GetCursorScreenPos();
+    const bool pressed = ImGui::InvisibleButton(id, ImVec2(size, size));
+    const bool hovered = ImGui::IsItemHovered();
+    if (hovered) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+    auto* draw = ImGui::GetWindowDrawList();
+    if (hovered) draw->AddRectFilled(start, ImVec2(start.x + size, start.y + size), rgba(255, 255, 255, 0.1f), S(4));
+    for (int dot = -1; dot <= 1; ++dot)
+        draw->AddCircleFilled(ImVec2(start.x + size * 0.5f + static_cast<float>(dot) * S(6), start.y + size * 0.5f), S(1.8f),
+            hovered ? color::text : color::muted);
+    return pressed;
+}
+
 void open_path(const fs::path& path) {
     std::error_code error;
     fs::create_directories(path, error);

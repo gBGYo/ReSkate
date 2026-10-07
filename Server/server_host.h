@@ -77,6 +77,8 @@ class Host {
         bool received_voice{};
         std::uint32_t voice_sequence{};
         VoiceBudget voice_budget;
+        OutfitBudget outfit_budget;
+        SoundBudget sound_budget;
         ChatRate chat_rate;
         ChatBudget admin_budget, throwdown_budget, party_budget;
         SpeedCheck speed;           // how fast their game runs, from their pose timestamps
@@ -89,7 +91,7 @@ class Host {
         bool scoring_flagged{};     // out of linked activities (config score_check)
         ChatBudget scoring_budget;
         std::uint64_t bans_sent{}; // the ban list revision this admin has
-        bool maps_sent{};          // this admin has the server's map list
+        bool maps_sent{};          // this player has the server's map list (send_maps)
         // The owner's own upload, and what the server shares of it.
         ObjectState objects, shared;
         std::uint64_t shared_from{};
@@ -118,11 +120,14 @@ class Host {
     std::optional<Vote> vote_;
     bool vote_recount_{}; // a player left: recount in tick(), never while guests_ is being walked
     std::map<std::uint64_t, std::uint64_t> vote_cooldowns_;
+    std::uint64_t map_since_{}; // rotation clock start: the last map change, or while nobody is on
+    bool rotation_warned_{};    // players were told the next map is a minute away
     // Parties (server_party.cpp): the server owns them; each roster carries them to everyone.
     PartyBook parties_;
     std::uint64_t party_revision_{};
     std::map<std::uint64_t, std::unique_ptr<Guest>> guests_;
     std::set<std::uint64_t> kicked_;
+    JoinBackoff join_backoff_; // Steam IDs whose attempts to join keep failing
     std::optional<PasswordKey> password_;
     std::uint64_t id_{}, secret_{}, epoch_{}, map_{}, world_ = 1;
     std::uint32_t sequence_{};
@@ -137,6 +142,7 @@ class Host {
     Packet packet(PacketKind kind, std::uint64_t now);
     unsigned capacity() const { return config_.max_players + 1; }
     std::string guest_name(const Guest &) const;
+    std::string player_name(std::string_view wanted, std::uint64_t id) const;
     bool is_admin(std::uint64_t id) const;
     bool is_banned(std::uint64_t id) const;
     void save();
@@ -152,9 +158,11 @@ class Host {
     void send_bans(Guest &admin);
     void send_maps(Guest &admin);
     void change_map(std::string_view map); // a level name, level path or destination
+    std::string wire_map_label() const;
     bool same_map(std::string_view asset) const { return map_hash(map_destination(asset)) == map_; }
     bool accept_data(Guest &source, const Packet &);
-    void receive(std::uint64_t peer, std::span<const std::uint8_t> bytes);
+    // `received_at`: the transport's arrival time for the message (TransportMessage::arrived).
+    void receive(std::uint64_t peer, std::span<const std::uint8_t> bytes, std::uint64_t received_at);
     void receive_cosmetics();
     void sync_objects();
     void apply_layers();
@@ -168,6 +176,10 @@ class Host {
     std::uint8_t enabled_votes() const;
     void reply(Guest &, std::string_view text);
     Guest *match_player(std::string_view text);
+    void tick_rotation();
+    std::string pool_text() const;     // the map pool, one map a line
+    std::string rotation_text() const; // the rotation's interval and next map
+    void resend_maps();                // after the pool or the admins change
     // Parties (server_party.cpp).
     void party_request(Guest &, PartyAction, std::uint64_t player);
     void party_command(Guest &, std::string_view line); // "/party ..."

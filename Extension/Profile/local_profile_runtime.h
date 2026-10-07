@@ -34,6 +34,11 @@ void local_profile_before_level_transition(unsigned next) noexcept;
 using LocalLocationTravelQueue = bool (*)(const char* map);
 void set_local_location_travel_queue(LocalLocationTravelQueue) noexcept;
 std::uint32_t local_customization_selected_preset() noexcept;
+// Whether a saved outfit can be loaded yet: a cosmetics catalog has been read
+// this session to check it against, or nothing is saved. The game builds every
+// slot up to the selected one when a slot is selected and does not ask again,
+// so the first selection waits for this.
+bool local_customization_outfits_loadable() noexcept;
 void observe_local_customization_selection(std::int32_t index) noexcept;
 struct LocalMissionRow {
     std::string id, group;

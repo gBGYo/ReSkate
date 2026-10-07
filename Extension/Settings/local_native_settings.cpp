@@ -6,6 +6,8 @@
 #include "Engine/Game/Build/20260929/local_native_settings.h"
 #include "Engine/Game/Build/20260929/named_settings.h"
 #include "local_user_settings.h"
+#include "Extension/Profile/local_profile_runtime.h"
+#include <cstring>
 #include <optional>
 #include <string_view>
 #include <array>
@@ -88,6 +90,50 @@ const dingosdk::Json* saved_native_option(unsigned location, const char* key) {
 }
 }
 
+namespace {
+// Options the game keeps on this device (location 0) whose default ReSkate changes. The game
+// saves these itself, so nothing is stored here but the fact that the default was applied:
+// once per profile, the first time the game asks for the option. After that the option is the
+// player's, to switch in the game's own menus.
+//   Accessibility_Party_Menu_Narration: on in the game's data, so the party menu was read
+//   aloud to every new player until they found the switch.
+struct OwnDefault {
+    std::string_view key;
+    bool value;
+    const char* applied; // the ReSkate preference that records it
+};
+constexpr OwnDefault own_defaults[]{{"Accessibility_Party_Menu_Narration", false, "Defaults.PartyMenuNarration"}};
+
+bool per_device_group(std::uintptr_t group) {
+    auto& s = local_runtime();
+    std::uintptr_t manager{}, begin{}, end{}, first{};
+    return group && s.active.load(std::memory_order_acquire) &&
+        memory::peek(s.base + addr::local_native_settings::profile_settings_manager, manager) && manager &&
+        memory::peek(manager, begin) && memory::peek(manager + 8, end) && begin && end >= begin &&
+        end - begin == 3 * sizeof(std::uintptr_t) && memory::peek(begin, first) && first == group;
+}
+// Runs on every get of an option outside the cloud groups: the key is compared first, and
+// only a key from the table costs anything more.
+void apply_own_default(std::uintptr_t group, const char* key, const NativeSettingValue* result) {
+    char text[64];
+    const auto length = memory::peek_cstring(reinterpret_cast<std::uintptr_t>(key), text, sizeof(text));
+    if (length <= 0) return;
+    const std::string_view name(text, static_cast<std::size_t>(length));
+    for (const auto& own : own_defaults) {
+        if (name != own.key) continue;
+        if (!per_device_group(group) || local_preference(own.applied).value_or(false)) return;
+        NativeSettingValue native{};
+        const auto current = native_setting_json(result);
+        if (!current || !current->is_boolean() || !memory::peek(reinterpret_cast<std::uintptr_t>(result), native)) return;
+        if (current->get<bool>() != own.value && !restore_native_scalar<bool>(group, key, native.type, dingosdk::Json(own.value))) return;
+        set_local_preference(own.applied, true);
+        dingosdk::logging::event(dingosdk::logging::Channel::settings,
+            dingosdk::Json{{"event", "local_native_default_applied"}, {"key", std::string(own.key)}, {"value", own.value}}.dump().c_str());
+        return;
+    }
+}
+}
+
 bool restore_native_setting(std::uintptr_t group, const char* key, std::uintptr_t type,
     const dingosdk::Json& saved) {
     const auto base = local_runtime().base;
@@ -115,7 +161,11 @@ const NativeSettingValue* native_setting_get(std::uintptr_t group, const char* k
     PreserveError preserve;
     try {
         const auto location = native_settings_location(group);
-        const auto* saved = location ? saved_native_option(location, key) : nullptr;
+        if (!location) {
+            apply_own_default(group, key, result);
+            return result;
+        }
+        const auto* saved = saved_native_option(location, key);
         if (!saved) return result;
         const auto current = native_setting_json(result);
         if (!current || *current == *saved) return result;

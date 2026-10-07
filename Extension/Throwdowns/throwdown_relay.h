@@ -22,8 +22,8 @@ struct ThrowdownPeer {
     std::size_t slot{};  // session slot on this machine
     std::string name;    // as the session shows it
     bool nearby{};         // close enough to the local skater to be invited into a coop challenge
-    // In the local player's party (a lobby is one party): only party members are invited into
-    // each other's coop challenges.
+    // In the local player's party: only party members are invited into each other's coop
+    // challenges.
     bool party{};
 };
 struct ThrowdownRelayInput {

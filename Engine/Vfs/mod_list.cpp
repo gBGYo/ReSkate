@@ -23,7 +23,9 @@ constexpr char levels_name[] = "reskate-levels.json";
 // Written by the tool that built the mod (Studio, since 2026-09-24): who made
 // it and when. Purely informational, so it is read loosely and never rejected.
 constexpr char build_name[] = "reskate-build.json";
-constexpr std::size_t maximum_order_bytes = 256 * 1024;
+// mods.json and the list of mods left out: as much as the JSON reader itself takes, so the
+// number of mods is not held down by the size of the file that lists them.
+constexpr std::size_t maximum_order_bytes = 4 * 1024 * 1024;
 constexpr std::size_t maximum_build_bytes = 16 * 1024;
 constexpr std::size_t maximum_info_bytes = 32 * 1024;
 constexpr std::size_t maximum_levels_bytes = 64 * 1024;
@@ -199,8 +201,6 @@ std::vector<std::pair<std::string, bool>> read_order(const fs::path& path) {
         throw std::runtime_error("mods.json schema must be integer 1");
     const auto& rows = root.at("mods");
     if (!rows.is_array()) throw std::runtime_error("mods.json mods must be an array");
-    if (rows.size() > maximum_mods)
-        throw std::runtime_error("mods.json lists more than " + std::to_string(maximum_mods) + " mods");
 
     std::vector<std::pair<std::string, bool>> order;
     std::set<std::string, std::less<>> seen;
@@ -398,8 +398,6 @@ ModList scan_mods(const std::filesystem::path& data_root) noexcept {
 }
 
 void save_mod_order(const std::filesystem::path& mods_root, const std::vector<ModEntry>& entries) {
-    if (entries.size() > maximum_mods)
-        throw std::runtime_error("At most " + std::to_string(maximum_mods) + " mods can be listed");
     auto rows = Json::array();
     for (const auto& entry : entries) {
         if (!valid_mod_name(entry.mod.name))

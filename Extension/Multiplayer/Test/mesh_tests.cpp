@@ -29,16 +29,24 @@ void remove_remote_network_objects(std::uint64_t owner, std::uint64_t epoch) {
 std::string network_object_status() { return {}; }
 bool simulated_placement_allowed = true;
 void set_lobby_object_placement_allowed(bool allowed) { simulated_placement_allowed = allowed; }
+unsigned simulated_object_limit{};
+void set_lobby_object_limit(unsigned limit) noexcept { simulated_object_limit = limit; }
+unsigned lobby_object_limit() noexcept { return simulated_object_limit; }
 unsigned simulated_guest_wipes{};
 bool clear_lobby_guest_objects() { ++simulated_guest_wipes; return true; }
 }
 namespace dingosdk {
 bool teleport_local_skater(const std::array<float, 3>&) { return true; }
 void update_board_lock(std::uintptr_t, std::uintptr_t, bool) noexcept {}
-void update_developer_hoodie(std::uintptr_t, std::uintptr_t, std::uint64_t, std::uint64_t, DeveloperHoodieState &) noexcept {}
-void update_developer_board(std::uintptr_t, std::uintptr_t, std::uint64_t, std::uint64_t, DeveloperBoardState &) noexcept {}
+void update_developer_hoodie(std::uintptr_t, std::uintptr_t, std::uint64_t, std::uint64_t, DeveloperHoodieState &,
+                             const multiplayer::MarkStyles &) noexcept {}
+void update_developer_board(std::uintptr_t, std::uintptr_t, std::uint64_t, std::uint64_t, DeveloperBoardState &,
+                            const multiplayer::MarkStyles &) noexcept {}
 }
 namespace dingosdk::multiplayer {
+// The backend's lists are not read here: a check lists the players it means.
+std::set<std::pair<std::uint64_t, IdentityList>> simulated_identities;
+bool identity_listed(std::uint64_t id, IdentityList list) noexcept { return simulated_identities.contains({id, list}); }
 bool local_allows_player_collision(std::uintptr_t, std::uintptr_t) noexcept { return false; }
 void update_remote_collision(std::uintptr_t, std::uintptr_t, const Pose &, bool, std::uint64_t) noexcept {}
 void expire_remote_collision(std::uintptr_t, std::uint64_t) noexcept {}
@@ -89,6 +97,8 @@ struct SimulatedNetwork {
     static inline std::uint64_t hold_control_to{};
     static inline std::array<unsigned, 3> lane_sends{};
     static inline std::map<std::uint64_t, std::uint64_t> queues;
+    // What a message's arrival time is (TransportMessage::arrived); 0: the transport does not say.
+    static inline std::uint64_t clock{};
     static std::pair<std::uint64_t, std::uint64_t> pair(std::uint64_t a, std::uint64_t b) {
         return {std::min(a, b), std::max(a, b)};
     }
@@ -200,7 +210,7 @@ bool SteamTransport::send(std::uint64_t id, std::span<const std::uint8_t> bytes,
         return true;
     if (!reliable && SimulatedNetwork::lose_unreliable && ++p.unreliable % 5 == 0)
         return true;
-    Impl::bus.at(id)->inbox.push_back({{p.state.local_id, {bytes.begin(), bytes.end()}}, lane});
+    Impl::bus.at(id)->inbox.push_back({{p.state.local_id, {bytes.begin(), bytes.end()}, SimulatedNetwork::clock}, lane});
     return true;
 }
 void SteamTransport::send_batch(std::span<TransportSend> messages) {
@@ -262,7 +272,7 @@ void prepare_native_indicators(std::uintptr_t) noexcept {}
 void prepare_player_ui(std::uintptr_t) noexcept {}
 void prepare_remote_audio(std::uintptr_t) noexcept {}
 bool install_entity_hooks(std::uintptr_t, std::string &) noexcept { return true; }
-void publish_custom_nametags(std::uintptr_t, std::vector<NametagPlayer>, std::optional<std::array<float, 3>>) noexcept {}
+void publish_custom_nametags(std::uintptr_t, std::vector<NametagPlayer>, std::optional<std::array<float, 3>>, bool, bool, float) noexcept {}
 void set_custom_nametags_enabled(bool) noexcept {}
 GameUiState sample_game_ui_state(std::uintptr_t) noexcept { return {}; }
 void note_local_skater(const Transform &) noexcept {}
@@ -389,11 +399,31 @@ void join_tick_checks() {
         check(queue_command("party", "status", {}), "A party request was not queued");
         tick(0, 0, true, map, nullptr);
         check(guest.requests.empty(), "A queued party request was not run");
+        // So do the host's switches in both menus: each has to be let into the queue. The
+        // physics tuning one was left out, and its switch did nothing in either menu.
+        for (const char *setting : {"object-placement", "noclip-allow", "nobail-allow", "boosts-allow", "tuning-enforce",
+                                    "world-layer-sync", "clear-objects"}) {
+            const bool queued = queue_command(setting, "toggle", {});
+            if (!queued) std::cerr << "Refused: " << setting << "\n";
+            check(queued, "A menu's host setting was refused before it reached the session");
+            tick(0, 0, true, map, nullptr);
+            check(guest.requests.empty(), "A queued host setting was not run");
+        }
         if (friend_join) {
             check(queue_command("join-friend-lobby", "9002", {}), "Steam friend join request should enter the normal queue");
             tick(0, 0, true, map, nullptr);
             check(guest.mode == Mode::join && guest.host_id == host.host_id && guest.joined_public_lobby == 9001,
                   "A Steam join click must not replace an active session");
+            // Picking the server they are on in the browser changes nothing either; picking
+            // another one leaves this session for it.
+            check(queue_command("join-lobby", "9001", {}), "A browser pick should enter the normal queue");
+            tick(0, 0, true, map, nullptr);
+            check(guest.mode == Mode::join && guest.host_id == host.host_id && guest.joined_public_lobby == 9001,
+                  "Picking the current server replaced the session");
+            check(queue_command("join-lobby", "9002", {}), "A browser hop should enter the normal queue");
+            tick(0, 0, true, map, nullptr);
+            check(guest.joined_public_lobby != 9001 && guest.status != "Leave your current session before joining another lobby.",
+                  "A guest could not hop to another server from the browser");
         }
     }
     stop(guest, "Timeout checks");
@@ -459,6 +489,8 @@ struct Simulation {
     NativeFrame local;
     std::vector<float> positions;
     unsigned capacity, tps;
+    std::size_t held = static_cast<std::size_t>(-1); // a node that is not run: held up, reading nothing
+    bool stamp{};                                     // messages carry when they arrived
     explicit Simulation(unsigned limit = max_players, unsigned rate = 20) : capacity(limit), tps(rate) {
         local.ready = true;
         local.pose.skater.resize(395);
@@ -493,9 +525,10 @@ struct Simulation {
     void run(unsigned frames) {
         for (unsigned i = 0; i < frames; ++i) {
             now += network_tick_us;
+            SimulatedNetwork::clock = stamp ? now : 0;
             for (std::size_t n = 0; n < nodes.size(); ++n) {
                 auto &s = *nodes[n];
-                if (s.mode == Mode::off)
+                if (s.mode == Mode::off || n == held)
                     continue;
                 local.pose.root.position[0] = static_cast<float>(now - 10000000) / 1000000;
                 local.pose.root.position[2] = n < positions.size() ? positions[n] : static_cast<float>(n);
@@ -571,6 +604,390 @@ void throwdown_routing_checks() {
     check(first.transport.send(first.host_id, encode_wire(stale), true), "Could not queue a wrong-world throwdown fixture");
     sim.run(10);
     check(host.throwdown_inbox.empty() && second.throwdown_inbox.empty(), "A throwdown message from another world was relayed");
+}
+// A lobby's parties are the ones its players form, kept by the host the way a dedicated
+// server keeps them: nobody is in a party for being in the lobby.
+void party_checks() {
+    Simulation sim;
+    for (unsigned i = 0; i < 4; ++i) sim.add();
+    sim.run(60); sim.fresh(4);
+    auto &host = *sim.nodes[0], &first = *sim.nodes[1], &second = *sim.nodes[2], &third = *sim.nodes[3];
+    const auto id = [](const Session &s) { return s.transport.status().local_id; };
+    for (const auto &node : sim.nodes)
+        check(!node->local_party && node->party_invites.empty(), "A lobby put a player in a party nobody formed");
+
+    check(send_party_request(first, PartyAction::invite, id(second)).empty(), "A guest's party invite was not sent");
+    sim.run(20);
+    check(second.party_invites.size() == 1 && second.party_invites.front().from == id(first),
+          "The host did not pass a guest's invite on to the invited guest");
+    check(!first.local_party && !second.local_party, "An unanswered invite made a party");
+    check(send_party_request(second, PartyAction::accept, id(first)).empty(), "Accepting an invite was not sent");
+    sim.run(40);
+    check(first.local_party && first.local_party == second.local_party && first.local_party_leader && !second.local_party_leader,
+          "An accepted invite did not put both guests in one party led by the inviter");
+    check(party_member(first, id(second)) && party_member(second, id(first)), "Party members do not see each other as members");
+    check(!host.local_party && !third.local_party && !party_member(third, id(first)) && party_of(third, id(first)) == first.local_party,
+          "Players outside a party were put in it, or cannot see who is in it");
+
+    // The host's own requests are answered on the spot, and make a second party.
+    check(send_party_request(host, PartyAction::invite, id(third)).empty(), "The host's own party invite was refused");
+    sim.run(20);
+    check(third.party_invites.size() == 1 && third.party_invites.front().from == id(host), "The host's invite did not reach the guest");
+    check(send_party_request(third, PartyAction::accept, id(host)).empty(), "Accepting the host's invite was not sent");
+    sim.run(40);
+    check(host.local_party && host.local_party == third.local_party && host.local_party_leader && host.local_party != first.local_party,
+          "The host and its guest are not in a party of their own");
+    check(party_of(first, id(third)) == host.local_party && !party_member(first, id(third)), "A guest does not see the other party");
+
+    // Party chat reaches the party and nobody else.
+    const auto heard = [](const Session &s, std::string_view words) {
+        return std::any_of(s.chat.begin(), s.chat.end(), [&](const auto &line) { return line.text.find(words) != std::string::npos; });
+    };
+    check(send_party_chat(first, "meet at the bowl").empty(), "A guest's party chat was refused");
+    sim.run(20);
+    check(heard(first, "meet at the bowl") && heard(second, "meet at the bowl"), "Party chat did not reach the party");
+    check(!heard(host, "meet at the bowl") && !heard(third, "meet at the bowl"), "Party chat reached players outside the party");
+    check(send_party_chat(host, "host party only").empty(), "The host's party chat was refused");
+    sim.run(20);
+    check(heard(third, "host party only") && !heard(first, "host party only") && !heard(second, "host party only"),
+          "The host's party chat did not stay in its party");
+
+    // Leaving: a party left with one member is no party.
+    check(send_party_request(second, PartyAction::leave, 0).empty(), "Leaving a party was not sent");
+    sim.run(40);
+    check(!first.local_party && !second.local_party, "A party of one was kept");
+    check(send_party_chat(first, "anyone").starts_with("You're not in a party"), "Party chat was sent without a party");
+    // A guest leaving the lobby is out of their party as well.
+    stop(third, "Left"); sim.run(40);
+    check(!host.local_party && host.parties.parties().empty(), "A guest who left the lobby stayed in the host's party");
+    std::cout << "Lobby parties: nobody by default, invites, two parties, party chat, leaving and departures passed.\n";
+}
+// A player's badge and colour, in chat and on their nametag: who the backend lists them as
+// comes before what they are in the lobby, and a developer before the other lists.
+void role_checks() {
+    Simulation sim;
+    for (unsigned i = 0; i < 4; ++i) sim.add();
+    sim.run(60); sim.fresh(4);
+    auto &host = *sim.nodes[0], &first = *sim.nodes[1], &second = *sim.nodes[2], &third = *sim.nodes[3];
+    const auto id = [](const Session &s) { return s.transport.status().local_id; };
+    using Role = std::pair<std::uint32_t, std::string>;
+    using L = IdentityList;
+    check(player_role(first, id(host), false) == Role{nametag_host, "Host"} &&
+              player_role(host, id(host), true) == Role{nametag_host, "Host"} &&
+              player_role(host, id(first), false) == Role{nametag_white, {}},
+          "Players the backend does not list did not get their lobby roles");
+
+    simulated_identities = {{id(host), L::homie}, {id(first), L::content_creator},
+                            {id(second), L::developer}, {id(second), L::content_creator}, {id(second), L::homie},
+                            {id(third), L::content_creator}, {id(third), L::homie}};
+    check(player_role(first, id(host), false) == Role{nametag_homie, "Homie"} &&
+              player_role(host, id(host), true) == Role{nametag_homie, "Homie"},
+          "A homie who hosts is not shown as a homie");
+    check(player_role(host, id(first), false) == Role{nametag_creator, "Creator"} &&
+              player_role(first, id(first), true) == Role{nametag_creator, "Creator"},
+          "A content creator is not shown as one");
+    check(player_role(host, id(second), false) == Role{nametag_developer, "Dev"},
+          "A developer on every list is not shown as a developer");
+    check(player_role(host, id(third), false) == Role{nametag_creator, "Creator"},
+          "A content creator who is also a homie is not shown as a creator");
+    // A special tag comes before every lobby role: a Centrix player who hosts is Centrix, not Host.
+    simulated_identities.insert({id(host), L::centrix});
+    check(player_role(first, id(host), false) == Role{nametag_centrix, "Centrix"} &&
+              player_role(host, id(host), true) == Role{nametag_centrix, "Centrix"},
+          "A Centrix player who hosts is not shown as Centrix");
+    simulated_identities.erase({id(host), L::centrix});
+    // A player who has turned their tag off (the Special page) is whatever they are in the lobby,
+    // to everyone: their appearance carries the choice through the host. Their items are a
+    // separate choice, which leaves the tag alone.
+    auto plain = packet(host, PacketKind::cosmetics, sim.now);
+    plain.appearance = {{skater_recipe_key, 2, {}, {{1, "Outfit0", {}}}}, {board_recipe_key, 1, {}, {{2, "Deck", {}}}}};
+    plain.appearance.hide_items = true;
+    host.cosmetic_packet = encode_wire(plain);
+    broadcast(host, plain, true, false, sim.now);
+    sim.run(20);
+    const auto told = [&](const Session &s) {
+        const auto *peer = find_peer(const_cast<Session &>(s), id(host));
+        return peer && !shows_items(*peer) && shows_tag(*peer);
+    };
+    check(told(first) && told(second) && player_role(first, id(host), false) == Role{nametag_homie, "Homie"},
+          "A homie who turned their items off was not seen to, or lost their tag");
+    // A later packet, as the host's game would send after the change.
+    const auto look = plain.appearance;
+    plain = packet(host, PacketKind::cosmetics, sim.now);
+    plain.appearance = look;
+    plain.appearance.hide_items = false, plain.appearance.hide_tag = true;
+    host.cosmetic_packet = encode_wire(plain);
+    broadcast(host, plain, true, false, sim.now);
+    sim.run(20);
+    check(player_role(first, id(host), false) == Role{nametag_host, "Host"} &&
+              player_role(second, id(host), false) == Role{nametag_host, "Host"},
+          "A homie who turned their tag off still shows as a homie");
+    const auto *shown = find_peer(first, id(host));
+    check(shown && shows_items(*shown), "Turning their tag off turned a player's items off");
+    check(player_role(host, id(first), false) == Role{nametag_creator, "Creator"}, "One player's choice hid another's tag");
+    show_own_items(false);
+    check(player_role(first, id(first), true) == Role{nametag_creator, "Creator"}, "Turning their items off hid a player's own tag");
+    show_own_items(true);
+    show_own_tag(false);
+    check(player_role(first, id(first), true) == Role{nametag_white, {}} &&
+              player_role(host, id(first), false) == Role{nametag_creator, "Creator"},
+          "A player's own choice did not hide their tag from themselves, or hid it from others before they were told");
+    show_own_tag(true);
+    // A chat line carries its sender's role.
+    check(send_chat(first, "new video is up").empty(), "A guest's chat was refused");
+    sim.run(20);
+    const auto said = std::find_if(host.chat.begin(), host.chat.end(), [](const auto &line) { return line.text == "new video is up"; });
+    check(said != host.chat.end() && said->color == nametag_creator && said->tag == "Creator",
+          "A content creator's chat line does not carry their role");
+
+    // None of it can be claimed. A badge goes to a Steam identity this PC is itself connected to:
+    // a guest knows another guest only from the host's roster until Steam connects the two, and
+    // a roster alone, which a host fills as it likes, gives nobody a badge.
+    const Role developer{nametag_developer, "Dev"};
+    auto *seen = find_peer(first, id(second));
+    check(seen && seen->direct_ready && player_role(first, id(second), false) == developer &&
+              player_role(third, id(second), false) == developer,
+          "Guests connected to a developer do not see them as one");
+    seen->direct_ready = false;
+    check(!steam_vouched(first, *seen) && player_role(first, id(second), false) == Role{nametag_white, {}},
+          "A guest took a developer's identity from the host's roster alone");
+    seen->direct_ready = true;
+    // In chat a guest's badge rests on their own copy of the line, sent straight to the players
+    // Steam connects them to: the host passes lines on, and could pass on anything under
+    // anyone's name.
+    const auto line_of = [](const Session &s, std::string_view text) {
+        const auto line = std::find_if(s.chat.begin(), s.chat.end(), [&](const auto &v) { return v.text == text; });
+        return line == s.chat.end() ? nullptr : &*line;
+    };
+    check(send_chat(second, "patch notes are out").empty(), "A developer's chat was refused");
+    sim.run(6);
+    const auto *real = line_of(third, "patch notes are out"), *at_host = line_of(host, "patch notes are out");
+    check(real && real->tag == "Dev" && real->color == nametag_developer && at_host && at_host->tag == "Dev",
+          "A developer's own line lost its badge on the way, or waited");
+    check(std::count_if(third.chat.begin(), third.chat.end(), [](const auto &v) { return v.text == "patch notes are out"; }) == 1,
+          "A line and its sender's own copy of it were both shown");
+    // A line the host makes up under a developer's name waits for their copy, then shows as
+    // any other player's would.
+    auto lie = packet(host, PacketKind::chat, sim.now);
+    lie.source = id(second), lie.epoch = second.epoch;
+    lie.text = "send me your password";
+    check(send_packet(host, id(third), lie, true, false), "The made-up line could not be sent");
+    sim.run(4);
+    check(!line_of(third, "send me your password"), "A line without its sender's copy did not wait for it");
+    sim.run(20);
+    const auto *made_up = line_of(third, "send me your password");
+    check(made_up && made_up->tag.empty() && made_up->color == nametag_white, "A line the host made up carries a developer's badge");
+    // So does one from a build that sends no copy; the host, who has it from the developer
+    // themselves, shows the badge.
+    auto old = packet(second, PacketKind::chat, sim.now);
+    old.text = "from an older build";
+    check(send_packet(second, id(host), old, true, false), "The older build's line could not be sent");
+    sim.run(30);
+    const auto *bare = line_of(third, "from an older build"), *first_hand = line_of(host, "from an older build");
+    check(bare && bare->tag.empty() && first_hand && first_hand->tag == "Dev",
+          "A line with no copy from its sender shows a badge to a guest, or lost it at the host");
+    // The other lists' badges travel the same way, guest to guest.
+    check(send_chat(third, "clip is on my channel").empty(), "A content creator's chat was refused");
+    sim.run(6);
+    const auto *clip = line_of(first, "clip is on my channel");
+    check(clip && clip->color == nametag_creator && clip->tag == "Creator", "A content creator's own line lost its badge");
+    // A player on no list stays plain whatever their own packets ask for: the styles only shape
+    // what a list already gives.
+    simulated_identities.erase({id(first), L::content_creator});
+    auto wish = packet(first, PacketKind::cosmetics, sim.now);
+    wish.appearance = look;
+    wish.appearance.marks.fill({MarkMode::gradient, {255, 0, 0}, {0, 0, 255}, 2});
+    first.cosmetic_packet = encode_wire(wish);
+    broadcast(first, wish, true, false, sim.now);
+    sim.run(20);
+    const auto *wisher = find_peer(host, id(first));
+    check(wisher && wisher->appearance.value() && wisher->appearance.value()->marks[0].mode == MarkMode::gradient &&
+              !identity_mark(id(first)) && player_role(host, id(first), false) == Role{nametag_white, {}} &&
+              player_role(third, id(first), false) == Role{nametag_white, {}},
+          "A player on no list got a badge by sending styles");
+    // And their chat is as it always was: shown as it arrives, with no copy sent or waited for.
+    check(send_chat(first, "anyone at the plaza").empty(), "A guest's chat was refused");
+    sim.run(3);
+    const auto *ordinary = line_of(third, "anyone at the plaza");
+    const auto *said_to = find_peer(third, id(first));
+    check(ordinary && ordinary->tag.empty() && ordinary->color == nametag_white && said_to && said_to->chat_proofs.empty() &&
+              said_to->chat_waiting.empty(),
+          "An ordinary player's line was held up, or a copy of it was kept");
+    // Nor can anyone name someone else as the sender. What does not come over that player's own
+    // Steam connection is refused, and whoever sent it is out of the session.
+    const auto heard = [](const Session &s) {
+        return std::any_of(s.chat.begin(), s.chat.end(), [](const auto &line) { return line.text == "free decks at my link"; });
+    };
+    auto forged = packet(first, PacketKind::chat, sim.now);
+    forged.source = id(second), forged.epoch = second.epoch;
+    forged.text = "free decks at my link";
+    check(send_packet(first, id(host), forged, true, false) && send_packet(first, id(third), forged, true, false),
+          "The forged chat line could not be sent");
+    sim.run(20);
+    check(!heard(host) && !heard(second) && !heard(third), "A guest spoke as a developer");
+    check(!find_peer(host, id(first)) && !find_peer(third, id(first)), "A guest who forged a sender stayed in the session");
+    // The same for how a developer looks: a guest cannot hide or restyle their tag and items.
+    auto costume = packet(third, PacketKind::cosmetics, sim.now);
+    costume.source = id(second), costume.epoch = second.epoch;
+    costume.sequence += 1000;
+    costume.appearance = look;
+    costume.appearance.hide_tag = costume.appearance.hide_items = true;
+    check(send_packet(third, id(host), costume, true, false), "The forged outfit could not be sent");
+    sim.run(20);
+    const auto *theirs = find_peer(host, id(second));
+    check(player_role(host, id(second), false) == developer && theirs && shows_tag(*theirs) && shows_items(*theirs) &&
+              !find_peer(host, id(third)),
+          "A guest changed how a developer shows, or stayed in the session after trying");
+    simulated_identities.clear();
+    std::cout << "Roles: lobby roles, homie, content creator, developer first, chat lines and claimed identities passed.\n";
+}
+// The backend's bans hold in every session, and reach one that is running: a banned guest is
+// out and cannot come back, the others stay, and nobody stays with a banned host.
+void global_ban_checks() {
+    Simulation sim;
+    for (unsigned i = 0; i < 3; ++i) sim.add();
+    sim.run(60); sim.fresh(3);
+    auto &host = *sim.nodes[0], &first = *sim.nodes[1], &second = *sim.nodes[2];
+    const auto id = [](const Session &s) { return s.transport.status().local_id; };
+    const auto first_id = id(first), host_id = id(host);
+
+    simulated_identities = {{first_id, IdentityList::banned}};
+    sim.run(40);
+    check(first.mode == Mode::off && first.status == banned_notice, "A banned guest stayed in the session");
+    check(!find_peer(host, first_id) && !find_peer(second, first_id), "The session kept a banned guest");
+    check(second.mode == Mode::join && find_peer(host, id(second)), "Banning one guest took another out");
+    // A banned player whose game does not stop itself is turned away by the host all the same.
+    first.mode = Mode::join;
+    first.host_id = host_id;
+    first.transport.join(host_id);
+    host.transport.poll();
+    networking(host, sim.local, sim.now);
+    const auto &links = host.transport.status().peers;
+    check(std::none_of(links.begin(), links.end(), [&](const auto &link) { return link.id == first_id; }) &&
+              !find_peer(host, first_id),
+          "The host let a banned player back in");
+    stop(first, "Left");
+
+    simulated_identities = {{host_id, IdentityList::banned}};
+    sim.run(40);
+    check(host.mode == Mode::off && host.status == banned_notice, "A banned host kept hosting");
+    check(second.mode == Mode::off, "A guest stayed with a banned host");
+    simulated_identities.clear();
+    std::cout << "Global bans: a banned guest, a guest who comes back, the other guests and a banned host passed.\n";
+}
+// A host that is kept from reading for a few seconds (a server whose console held it up) then
+// reads everything its guests sent meanwhile in one go. That is not a flood: nobody is dropped
+// for it, while a real flood still is.
+void stall_checks() {
+    {
+        // 16 s of a player's ordinary traffic read at once, counted by when it arrived.
+        ReceiveBudget backlog;
+        bool kept = true;
+        for (std::uint64_t i = 0; i < 16 * 90; ++i) kept = kept && backlog.accept(5000000 + i * (1000000 / 90), 300);
+        check(kept, "A backlog read after a stall was taken for a flood");
+        ReceiveBudget flood;
+        bool refused = false;
+        for (std::uint64_t i = 0; i < 2000; ++i) refused = refused || !flood.accept(5000000 + i * 100, 300);
+        check(refused, "A flood was let through the packet limit");
+        // Lanes are read one after another, so arrival times step back and forth.
+        ReceiveBudget lanes;
+        refused = false;
+        for (std::uint64_t i = 0; i < 2000; ++i) refused = refused || !lanes.accept(i % 2 ? 9000000 : 9500000, 300);
+        check(refused, "Packets read out of arrival order started the count again");
+    }
+    Simulation sim(max_players, 120);
+    sim.stamp = true;
+    for (unsigned i = 0; i < 4; ++i) sim.add();
+    sim.run(240);
+    auto &host = *sim.nodes[0];
+    const auto connected = [&] {
+        unsigned count{};
+        for (std::size_t n = 1; n < sim.nodes.size(); ++n) {
+            const auto *peer = find_peer(host, sim.nodes[n]->transport.status().local_id);
+            count += peer && peer->handshaken && sim.nodes[n]->mode == Mode::join;
+        }
+        return count;
+    };
+    check(connected() == 3, "The stall fixture did not connect its guests");
+    // Nine seconds unread: under the ten after which a silent player is given up on, and more
+    // than a second's allowance from every guest.
+    const auto sent = sim.nodes[1]->transport.status().sent;
+    sim.held = 0;
+    sim.run(static_cast<unsigned>(9000000 / network_tick_us));
+    sim.held = static_cast<std::size_t>(-1);
+    check(sim.nodes[1]->transport.status().sent - sent > 2ULL * multiplayer_tick_rates.back() + 80 + 32,
+          "The stall fixture did not queue more than the packet limit");
+    sim.run(240);
+    if (host.mode != Mode::host || connected() != 3)
+        for (std::size_t n = 0; n < sim.nodes.size(); ++n)
+            std::cerr << "  node " << n << " mode " << static_cast<int>(sim.nodes[n]->mode) << ": " << sim.nodes[n]->status << "\n";
+    check(host.mode == Mode::host && connected() == 3, "Guests were dropped after their host was held up for a few seconds");
+    SimulatedNetwork::clock = 0;
+    std::cout << "Stalls: a held-up host keeps its guests; floods and out-of-order arrival are still limited.\n";
+}
+// What a host changes outside its physics tuning (the trainer's class values and trick
+// multipliers) reaches its guests while it sets everyone's physics: when it changes, to a
+// player who joins later, and from nobody but the host.
+void physics_extras_checks() {
+    Simulation sim;
+    for (unsigned i = 0; i < 3; ++i) sim.add();
+    sim.run(60); sim.fresh(3);
+    auto &host = *sim.nodes[0], &first = *sim.nodes[1], &second = *sim.nodes[2];
+    // The simulated players share one process, so they share what "the local player" changed:
+    // only the host's session sends it.
+    const std::vector<std::uint8_t> boosted{1, 2, 3, 4, 5}, calmer{9, 8};
+    const auto physics = [&] { for (auto &node : sim.nodes) update_physics_tuning(*node, sim.local, sim.now); };
+    dingosdk::set_local_physics_extras(boosted);
+    physics();
+    sim.run(10);
+    check(first.host_extras == boosted && second.host_extras == boosted, "The host's physics extras did not reach its guests");
+    check(!host.host_extras, "The host took physics extras for itself");
+
+    update_physics_tuning(first, sim.local, sim.now);
+    std::uint64_t seen{};
+    std::vector<std::uint8_t> handed;
+    check(dingosdk::session_tuning_enforced() && dingosdk::host_physics_extras(seen, handed) && handed == boosted,
+          "A guest's game was not handed the host's physics extras");
+    update_physics_tuning(host, sim.local, sim.now);
+    check(!dingosdk::session_tuning_enforced(), "A host was told another player sets its physics");
+
+    auto &late = sim.add();
+    sim.run(60); sim.fresh(4);
+    check(late.host_extras == boosted, "A player who joined later did not get the host's physics extras");
+
+    dingosdk::set_local_physics_extras(calmer);
+    physics();
+    sim.run(10);
+    check(first.host_extras == calmer && second.host_extras == calmer && late.host_extras == calmer,
+          "A change to the host's physics extras did not reach its guests");
+
+    // A guest cannot set the others' physics.
+    auto forged = packet(first, PacketKind::physics_extras, sim.now);
+    forged.extras = {6, 6, 6};
+    broadcast(first, forged, true, false, sim.now);
+    sim.run(10);
+    check(second.host_extras == calmer && late.host_extras == calmer && !host.host_extras,
+          "A guest's physics extras were taken for the host's");
+
+    // Back to the game's own: sent, so no guest keeps what it had.
+    dingosdk::set_local_physics_extras({});
+    physics();
+    sim.run(10);
+    check(first.host_extras && first.host_extras->empty() && second.host_extras && second.host_extras->empty(),
+          "Guests kept physics extras the host no longer has");
+
+    // Enforcement off: nothing kept for late joiners, and a guest's game is its own again.
+    host.enforce_tuning = false;
+    host.roster_dirty = true;
+    physics();
+    sim.run(20);
+    check(host.extras_packet.empty() && !host.sent_extras, "A host that stopped setting everyone's physics kept its extras packet");
+    check(!first.enforce_tuning, "The guest was not told the host stopped setting everyone's physics");
+    update_physics_tuning(first, sim.local, sim.now);
+    check(!dingosdk::session_tuning_enforced(), "A guest stayed under the host's physics after the host let go");
+    dingosdk::set_session_tuning_enforced(false);
+    dingosdk::set_host_physics_extras({});
+    std::cout << "Physics extras: host to guests, late joiners, changes, forged senders and enforcement off passed.\n";
 }
 // A lobby host keeps a guest whose mods change scoring or physics out of linked activities: the roster
 // flags them for everyone and the host passes none of their throwdown messages on.
@@ -704,6 +1121,7 @@ void tick_settings_checks() {
         const auto epoch = configured.epoch;
         (void)command("host-config", "code 8 45 Invalid");
         check(configured.epoch == epoch && configured.tps == rate, "Invalid TPS replaced an active session");
+        check(configured.status == "Choose 20, 30, 60, or 120 TPS before hosting.", "A refused host left no status for the menu");
         stop(configured, "TPS fixture");
         Simulation sim(4, rate);
         sim.add(); sim.add(); sim.run(70);
@@ -717,6 +1135,13 @@ void tick_settings_checks() {
     }
     (void)command("host", "code 8 120 is a lobby name");
     check(configured.tps == 30 && configured.lobby_name == "120 is a lobby name", "Legacy host command changed meaning");
+    // Whose physics guests skate with is the host's to switch, and is remembered for next time.
+    check(configured.enforce_tuning, "A new lobby did not start with the host's physics for everyone");
+    (void)command("tuning-enforce", "off");
+    check(!configured.enforce_tuning && !configured.host_preferences.enforce_tuning && configured.roster_dirty,
+          "The host could not let guests skate with their own physics");
+    (void)command("tuning-enforce", "toggle");
+    check(configured.enforce_tuning && configured.host_preferences.enforce_tuning, "The host could not switch its physics for everyone back on");
     stop(configured, "TPS fixture complete");
 }
 void pacing_checks() {
@@ -848,7 +1273,7 @@ struct MapPair {
     static MapLoadResult loader(std::string_view, bool submitted, std::string &detail) {
         if (missing) {
             detail = "Map not installed.";
-            return MapLoadResult::failed;
+            return MapLoadResult::missing;
         }
         if (!submitted) ++loads;
         return submitted ? MapLoadResult::waiting : MapLoadResult::queued;
@@ -959,8 +1384,9 @@ void map_checks() {
         MapPair pair;
         MapPair::missing = true;
         pair.run(20);
-        check(pair.guest.mode == Mode::off && pair.guest.status == "Map not installed.",
-              "Missing map did not end the pending join with its error");
+        const auto said = "The host is on Beach, which is not installed on this PC. Install its map mod and join again.";
+        check(pair.guest.mode == Mode::off && pair.guest.status == said && pair.guest.leave_notice == said,
+              "Missing map did not end the pending join naming the map");
     }
     {
         MapPair pair;
@@ -1213,7 +1639,7 @@ void session_controls_checks() {
         p.object_placement = host.object_placement;
         p.members.push_back({p.source, host.epoch, "Host"});
         for (const auto &peer : host.peers) if (peer.handshaken) p.members.push_back(peer.member);
-        // The lobby party, as the host's own roster sends it.
+        // Everyone in one party led by the host, as a roster may list them.
         for (auto &m : p.members) {
             m.party = p.members.size() > 1 ? lobby_party : 0;
             m.party_leader = m.party && m.id == p.source;
@@ -1413,7 +1839,7 @@ void world_layer_sync_checks() {
         p.layers = pack_world_layers(host.layers);
         p.members.push_back({p.source, host.epoch, "Host"});
         for (const auto &peer : host.peers) if (peer.handshaken) p.members.push_back(peer.member);
-        // The lobby party, as the host's own roster sends it.
+        // Everyone in one party led by the host, as a roster may list them.
         for (auto &m : p.members) {
             m.party = p.members.size() > 1 ? lobby_party : 0;
             m.party_leader = m.party && m.id == p.source;
@@ -1497,7 +1923,7 @@ void distance_settings_checks() {
         p.distances = host.distances; p.capacity = host.capacity;
         p.members.push_back({p.source, host.epoch, "Host"});
         for (const auto &peer : host.peers) if (peer.handshaken) p.members.push_back(peer.member);
-        // The lobby party, as the host's own roster sends it.
+        // Everyone in one party led by the host, as a roster may list them.
         for (auto &m : p.members) {
             m.party = p.members.size() > 1 ? lobby_party : 0;
             m.party_leader = m.party && m.id == p.source;
@@ -1793,6 +2219,11 @@ int main(int argc, char **argv) {
         if (argc == 2 && std::string_view(argv[1]) == "--travel-only") return 0;
         dingosdk::multiplayer::mesh_checks();
         dingosdk::multiplayer::throwdown_routing_checks();
+        dingosdk::multiplayer::party_checks();
+        dingosdk::multiplayer::role_checks();
+        dingosdk::multiplayer::global_ban_checks();
+        dingosdk::multiplayer::physics_extras_checks();
+        dingosdk::multiplayer::stall_checks();
         dingosdk::multiplayer::scoring_checks();
         dingosdk::multiplayer::object_sync_checks();
         dingosdk::multiplayer::session_controls_checks();

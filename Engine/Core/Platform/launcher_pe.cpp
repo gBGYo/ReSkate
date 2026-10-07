@@ -1,5 +1,6 @@
 #include "launcher_support.h"
 #include "launcher_support_internal.h"
+#include "path_text.h"
 
 #ifdef _WIN32
 #include <Windows.h>
@@ -137,15 +138,56 @@ std::string rva_string(const MappedFile& file, const ParsedPe& pe, std::uint32_t
     fail("Unterminated PE export name");
 }
 
+// Opens a file to read all of it. A file that was written a moment ago (a download) is often
+// held by the antivirus scanning it, so a sharing violation is waited out for a few seconds.
+// A file that still cannot be opened is named along with the reason: with ReSkate.dll that is
+// nearly always an antivirus blocking it, and "cannot open file" told the player nothing.
+Handle open_to_read(const fs::path& path) {
+    DWORD error{};
+    for (int attempt = 0; attempt < 50; ++attempt) {
+        Handle file(CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN, nullptr));
+        if (file.get() != INVALID_HANDLE_VALUE) return file;
+        error = GetLastError();
+        if (error != ERROR_SHARING_VIOLATION && error != ERROR_LOCK_VIOLATION) break;
+        Sleep(100);
+    }
+    const auto name = path_utf8(path.filename());
+    const auto folder = path_utf8(path.parent_path());
+    std::string message;
+    switch (error) {
+    case ERROR_VIRUS_INFECTED:
+    case ERROR_VIRUS_DELETED:
+        message = "Your antivirus blocked " + name + ". Add the folder " + folder +
+                  " to its exclusions (in Windows Security: Virus & threat protection > Exclusions), then try again.";
+        break;
+    case ERROR_ACCESS_DENIED:
+        message = name + " cannot be read: access was denied. An antivirus is probably blocking it: add the folder " + folder +
+                  " to its exclusions, then try again.";
+        break;
+    case ERROR_SHARING_VIOLATION:
+    case ERROR_LOCK_VIOLATION:
+        message = name + " is in use by another program, usually an antivirus scan. Close Skate if it is running, wait a moment and try again; "
+                  "if it keeps happening, add the folder " + folder + " to your antivirus exclusions.";
+        break;
+    case ERROR_FILE_NOT_FOUND:
+    case ERROR_PATH_NOT_FOUND:
+        message = name + " is missing from " + folder + ". If it was just downloaded, an antivirus removed it: add the folder to its "
+                  "exclusions, then try again.";
+        break;
+    default:
+        message = "Cannot read " + name + " in " + folder;
+        break;
+    }
+    throw std::runtime_error(message + " (Windows error " + std::to_string(error) + ")");
+}
 } // namespace
 
 #endif // _WIN32
 
 std::string sha256_file(const fs::path& path) {
 #ifdef _WIN32
-    Handle file(CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_DELETE,
-        nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN, nullptr));
-    if (file.get() == INVALID_HANDLE_VALUE) detail::fail("Cannot open file for SHA-256");
+    const auto file = open_to_read(path);
 
     Algorithm algorithm;
     if (BCryptOpenAlgorithmProvider(&algorithm.value, BCRYPT_SHA256_ALGORITHM, nullptr, 0) < 0)

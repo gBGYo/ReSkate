@@ -146,12 +146,17 @@ struct SteamTransport::Impl {
                       reinterpret_cast<void *>(&changed));
         return option;
     }
-    std::array<SteamNetworkingConfigValue_t, 2> options() {
-        std::array<SteamNetworkingConfigValue_t, 2> out{};
+    std::array<SteamNetworkingConfigValue_t, 3> options() {
+        std::array<SteamNetworkingConfigValue_t, 3> out{};
         out[0] = callback_option();
         // Raise this connection's ceiling; Steam retains congestion control and
         // its default minimum. Do not alter the game's global Steam settings.
         out[1].SetInt32(k_ESteamNetworkingConfig_SendRateMax, 1024 * 1024);
+        // Every connection goes through Steam's relays, which is how players who are not
+        // Steam friends already connect: no player's IP address is shared with the others
+        // in a session, whatever each one's own Steam setting is.
+        out[2].SetInt32(k_ESteamNetworkingConfig_P2P_Transport_ICE_Enable,
+                        k_nSteamNetworkingConfig_P2P_Transport_ICE_Enable_Disable);
         return out;
     }
     void read_status(Link &link) {
@@ -691,7 +696,8 @@ std::vector<TransportMessage> SteamTransport::receive() {
                 continue;
             }
             const auto *data = static_cast<const std::uint8_t *>(message->m_pData);
-            result.push_back({id, {data, data + message->m_cbSize}});
+            result.push_back({id, {data, data + message->m_cbSize},
+                              message->m_usecTimeReceived > 0 ? static_cast<std::uint64_t>(message->m_usecTimeReceived) : 0});
             ++p.state.received;
             p.state.received_bytes += static_cast<std::uint64_t>(message->m_cbSize);
         }

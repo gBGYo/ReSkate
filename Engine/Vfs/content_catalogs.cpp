@@ -54,6 +54,40 @@ void add_item(Catalogs& out, const Fields& record) {
     out.items[key] = std::move(entry);
 }
 
+// Music playlists: field 1 names the playlist, repeated field 2 lists tracks
+// ("Artist - Title"), and field 10 is a message carrying the display name and
+// artwork. Owned-item records put a varint in field 10, so requiring the byte
+// wire separates the two. First record for an id wins.
+void add_music_playlist(Catalogs& out, const std::string& id, const Fields& record) {
+    const auto content = message(record, 10);
+    if (!content) return;
+    const auto name = text(*content, 10);
+    if (!name) return;
+    std::vector<std::string> tracks;
+    for (const auto& field : record) {
+        if (field.number != 2 || field.wire != Wire::bytes) continue;
+        const auto value = text(&field);
+        if (!value || value->find(" - ") == std::string::npos) continue;
+        tracks.push_back(*value);
+    }
+    if (tracks.size() < 2) return;
+    Catalogs::MusicPlaylistEntry entry;
+    entry.name = *name;
+    entry.artwork = text(*content, 11).value_or("");
+    entry.tracks = std::move(tracks);
+    out.music_playlists.try_emplace(id, std::move(entry));
+}
+
+// Songs: field 1 is "Artist - Title" and field 10 a message with the artist (10), title (11) and
+// cdn:/ cover art (12). First record for an id wins.
+void add_music_song(Catalogs& out, const std::string& id, const Fields& record) {
+    if (id.find(" - ") == std::string::npos) return;
+    const auto content = message(record, 10);
+    if (!content || !text(*content, 10) || !text(*content, 11)) return;
+    if (const auto artwork = text(*content, 12); artwork && artwork->starts_with("cdn:/"))
+        out.music_song_artwork.try_emplace(id, *artwork);
+}
+
 // Grant lists: repeated `number` entries, each {1: kind, 2: id}.
 struct Grant { std::string kind, id; };
 std::vector<Grant> grants(const Fields& fields, std::uint32_t number) {
@@ -221,6 +255,8 @@ Catalogs read_catalogs(const std::filesystem::path& folder) {
             if (!id) continue;
             if (text(*fields, 3) == "entitlement") entitlements.insert(*id);
             add_item(out, *fields);
+            add_music_playlist(out, *id, *fields);
+            add_music_song(out, *id, *fields);
             add_challenge(out, *id, *fields);
             add_object_category(out, *id, *fields);
             add_travel(out, *id, *fields);

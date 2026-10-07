@@ -58,6 +58,16 @@ struct SteamVoice {
         if (!user) throw std::runtime_error("Steam Voice is unavailable.");
     }
 };
+// Steam's decoder reads bytes another player sent. A fault inside it is that one packet lost,
+// not the game: the call is guarded like the other native calls made with remote data.
+int decode_voice(const SteamVoice &steam, const void *in, std::uint32_t in_size, void *out, std::uint32_t out_size,
+                 std::uint32_t *written, std::uint32_t rate) noexcept {
+    __try {
+        return steam.decode(steam.user, in, in_size, out, out_size, written, rate);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return -1;
+    }
+}
 struct PcmBuffer {
     std::vector<std::uint8_t> bytes;
     std::atomic<bool> done{};
@@ -271,7 +281,7 @@ struct VoiceChat::Impl {
                         const bool use_native = native.available() && radius_for(packet.voice.distance, settings) > 0.f;
                         std::vector<std::uint8_t> pcm(max_pcm_bytes);
                         std::uint32_t size{};
-                        if (steam.decode(steam.user, packet.voice.bytes.data(), static_cast<std::uint32_t>(packet.voice.bytes.size()),
+                        if (decode_voice(steam, packet.voice.bytes.data(), static_cast<std::uint32_t>(packet.voice.bytes.size()),
                                          pcm.data(), static_cast<std::uint32_t>(pcm.size()), &size,
                                          use_native ? native_voice_rate : sample_rate) != 0 ||
                             !size || size > pcm.size() || size % 2) continue;

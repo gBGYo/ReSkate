@@ -15,6 +15,7 @@
 #include "Extension/Rendering/display_startup.h"
 #include "Extension/World/native_route_lookahead.h"
 #include "Extension/World/native_entity_pages.h"
+#include "Extension/World/physics_world_size.h"
 #include <string>
 
 namespace dingosdk::runtime {
@@ -51,6 +52,8 @@ bool initialize_bootstrap(std::uintptr_t base) {
     if (!stage(Channel::assets, "Native render-resource pools", ready, error)) return false;
     error.clear(); ready = start_native_entity_pages(base, error);
     if (!stage(Channel::world, "Native entity pages (1048576 entity/update/render slots, 16384 spatial blocks/bucket, 128 MiB arena minimum)", ready, error)) return false;
+    error.clear(); ready = start_physics_world_size(base, error);
+    if (!stage(Channel::world, "Physics world pools (65000 static bodies)", ready, error)) return false;
     error.clear(); ready = start_native_route_lookahead(base, error);
     if (!stage(Channel::world, "NPC route cycle and endpoint guards", ready, error)) return false;
     if (!stage(Channel::graphics, "Display startup settings", start_display_settings(base), {})) return false;

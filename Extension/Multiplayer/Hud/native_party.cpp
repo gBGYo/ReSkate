@@ -388,7 +388,7 @@ void update_native_party(std::uintptr_t base, const PartyRoster &roster, unsigne
             if (!roster[i].id) continue;
             auto &record = next->records[i]; record.player = roster[i];
             record.player_id = 0x7e000000U + static_cast<std::uint32_t>(i);
-            // The game's colour list is sized for its eight-member parties: a bigger lobby party repeats them.
+            // The game's colour list is sized for its eight-member parties: a bigger one repeats them.
             record.colour = roster[i].member ? colours++ % static_cast<std::int32_t>(authored_party_slots) : -1;
             record.friend_of = std::any_of(steam->friends.begin(), steam->friends.end(), [&](const auto &friend_info) {
                 return friend_info.id == roster[i].id;

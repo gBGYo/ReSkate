@@ -50,6 +50,8 @@ void load_host_preferences(Session &s) {
         p.voice_range = value->get<float>();
     if (const auto value = number("Host.ObjectPlacement"); value && *value >= 0 && valid_object_placement(static_cast<std::uint64_t>(*value)))
         p.placement = static_cast<ObjectPlacement>(*value);
+    if (const auto value = number("Host.ObjectLimit"); value && *value >= 0 && valid_object_limit(static_cast<std::uint64_t>(*value)))
+        p.object_limit = static_cast<unsigned>(*value);
     p.guest_noclip = profile_runtime::local_preference("Host.GuestNoclip").value_or(true);
     p.guest_no_bail = profile_runtime::local_preference("Host.GuestNoBail").value_or(true);
     p.guest_boosts = profile_runtime::local_preference("Host.GuestBoosts").value_or(true);
@@ -70,6 +72,7 @@ void save_host_preferences(const Session &s) {
         {"Host.Distance.HalfReturn", static_cast<std::int64_t>(p.distances.half_rate_return)},
         {"Host.Distance.LowStart", static_cast<std::int64_t>(p.distances.low_rate_start)},
         {"Host.ObjectPlacement", static_cast<std::int64_t>(p.placement)},
+        {"Host.ObjectLimit", static_cast<std::int64_t>(p.object_limit)},
         {"Host.GuestNoclip", p.guest_noclip},
         {"Host.GuestNoBail", p.guest_no_bail},
         {"Host.GuestBoosts", p.guest_boosts},
@@ -147,6 +150,9 @@ void publish(Session &s, const NativeFrame *local) {
     view.tps = s.tps;
     view.distances = s.distances;
     view.object_placement = s.object_placement;
+    view.object_limit = s.object_limit;
+    view.object_limit_own = s.mode == Mode::host || s.server_admin ? 0 : s.object_limit; // as apply_object_limit gives this game
+    view.objects_placed = s.mode == Mode::off ? 0 : static_cast<unsigned>(s.local_objects.objects().size());
     view.guest_noclip = s.guest_noclip;
     view.guest_no_bail = s.guest_no_bail;
     view.guest_boosts = s.guest_boosts;
@@ -167,12 +173,39 @@ void publish(Session &s, const NativeFrame *local) {
     view.lobby_name = s.lobby_name;
     // A dedicated server's roster capacity counts the server itself.
     view.capacity = static_cast<int>(dedicated_host(s) ? s.capacity - 1 : s.capacity);
-    view.party_overlay = s.party_overlay;
     load_host_preferences(s);
     view.saved_host = {true, s.host_preferences.public_lobby, s.host_preferences.password_required,
                        static_cast<int>(s.host_preferences.capacity), s.host_preferences.tps, s.host_preferences.lobby_name};
     view.nametags = s.nametags;
     view.custom_nametags = s.custom_nametags;
+    if (const auto social = steam_social_snapshot())
+        if (const auto mark = identity_mark(social->local.id)) {
+            std::tie(view.identity_tag_colour, view.identity_tag) = mark_role(*mark);
+            view.identity_animation =
+                *mark == IdentityList::developer ? "RAINBOW" : *mark == IdentityList::content_creator ? "RED" :
+                *mark == IdentityList::centrix ? "BLUE" : *mark == IdentityList::staff ? "GREEN" : "GOLD";
+            // A developer's standard is the rainbow already.
+            view.identity_rainbow = *mark == IdentityList::staff;
+            const auto styles = developer_hoodie_detail::own_styles.load();
+            const auto standard = developer_hoodie_detail::standard_picks(*mark);
+            view.identity_styles.resize(styles.size());
+            for (std::size_t i = 0; i < styles.size(); ++i) {
+                // A cosmetic never given colours shows its list's own in the pickers.
+                // The rainbow has no colours of its own to show either.
+                const bool rainbow = view.identity_rainbow && rainbow_style(styles[i]);
+                const bool picked = !rainbow && (styles[i].mode == MarkMode::gradient || styles[i].mode == MarkMode::solid ||
+                                                 styles[i].from != styles[i].to || styles[i].from != std::array<std::uint8_t, 3>{});
+                const auto &from = picked ? styles[i].from : standard.first, &to = picked ? styles[i].to : standard.second;
+                auto &shown = view.identity_styles[i];
+                shown.name = mark_item_names[i];
+                shown.mode = rainbow ? 4 : static_cast<int>(styles[i].mode);
+                shown.speed = styles[i].speed;
+                for (std::size_t part = 0; part < 3; ++part)
+                    shown.from[part] = static_cast<float>(from[part]) / 255.f, shown.to[part] = static_cast<float>(to[part]) / 255.f;
+            }
+        }
+    view.identity_tag_shown = own_tag_shown();
+    view.identity_items_shown = own_items_shown();
     load_host_preferences(s);
     view.voice_range = s.mode == Mode::host ? s.voice_range
                      : dedicated_host(s) ? s.roster_voice_range : s.host_preferences.voice_range;
@@ -181,7 +214,7 @@ void publish(Session &s, const NativeFrame *local) {
     view.party = s.local_party;
     view.party_leader = s.local_party_leader;
     view.party_open = s.local_party_open;
-    view.parties = view.dedicated;
+    view.parties = s.mode == Mode::host || s.mode == Mode::join;
     for (const auto &invite : s.party_invites) {
         const auto *from = find_peer(s, invite.from);
         view.party_invites.push_back({invite.from, from && !from->member.name.empty() ? from->member.name
@@ -192,9 +225,17 @@ void publish(Session &s, const NativeFrame *local) {
         view.server_bans = true;
         view.server_ban_total = s.server_ban_total;
         view.server_maps = s.server_maps;
+        view.server_map_pool = s.server_map_pool;
+        view.server_map_rotation = s.server_map_rotation;
+        view.server_map_votes = (s.server_votes & server_vote_map) != 0;
     }
     view.chat_visible = s.chat_visible;
     view.chat_filter = s.chat_filter;
+    view.chat_bubbles = s.chat_bubbles;
+    view.chat_bubbles_own = s.chat_bubbles_own;
+    view.chat_bubbles_distance = s.chat_bubbles_distance;
+    view.chat_bubbles_duration = s.chat_bubbles_duration;
+    view.chat_bubbles_history = s.chat_bubbles_history;
     view.object_status = network_object_status();
     view.players = static_cast<int>(player_count(s));
     view.sent = t.sent;
@@ -230,7 +271,16 @@ void publish(Session &s, const NativeFrame *local) {
     view.browser_status = lobby.browser;
     // Dedicated servers first: they are always up and never a stranger's own session.
     view.lobbies = s.servers.rows();
+    // Looked up as the list is shown: the team's list can arrive, or change, after a server was found.
+    for (auto &server : view.lobbies) server.official = official_server(server.id);
     view.lobbies.insert(view.lobbies.end(), lobby.rows.begin(), lobby.rows.end());
+    // Steam friends by the public server or lobby their game says they are in.
+    if (const auto social = steam_social_snapshot())
+        for (const auto &player : social->friends) {
+            if (!player.session) continue;
+            const auto row = std::find_if(view.lobbies.begin(), view.lobbies.end(), [&](const auto &entry) { return entry.id == player.session; });
+            if (row != view.lobbies.end() && row->friends.size() < 16) row->friends.push_back(player.name.empty() ? std::string("A friend") : player.name);
+        }
     view.status = s.status;
     view.native_status = s.native_status;
     view.audio_captured = captured_audio_frames();
@@ -395,7 +445,7 @@ std::vector<MultiplayerChatCommand> chat_commands(const Session &s) {
         {"/tp", "/tp <player>", "Teleport beside a player (or /tp <x> <y> <z>)", "player"},
         {"/p", "/p <message>", "Talk to your party only"},
     };
-    if (dedicated_host(s)) {
+    if (s.mode == Mode::host || s.mode == Mode::join) {
         list.push_back({"/party invite", "/party invite <player>", "Invite a player to your party", "player"});
         list.push_back({"/party accept", "/party accept [player]", "Join the party you were invited to", "player"});
         list.push_back({"/party decline", "/party decline [player]", "Turn down a party invite", "player"});
@@ -425,6 +475,8 @@ std::vector<MultiplayerChatCommand> chat_commands(const Session &s) {
             list.push_back({"/tod", "/tod <time>", "Admin: set the time of day", "time"});
             list.push_back({"/votes", "/votes [map|kick|tod on|off|<percent>]", "Admin: the server's vote settings"});
             list.push_back({"/vote-cancel", "/vote-cancel", "Admin: stop the running vote"});
+            list.push_back({"/map-pool", "/map-pool [add|remove <map>|clear]", "Admin: the maps players vote between and the rotation uses"});
+            list.push_back({"/rotation", "/rotation [<minutes>|off]", "Admin: change the map on a timer, through the map pool"});
         }
     }
     return list;
@@ -496,31 +548,46 @@ void publish_chat(Session &s) {
             auto [found, added] = s.chat_masked.try_emplace(line.sequence);
             if (added) found->second = {text::mask_bad_words(line.name), text::mask_bad_words(line.text)};
             line.name = found->second.first;
-            line.text = found->second.second;
+            if (found->second.second != line.text) line.unmasked = std::exchange(line.text, found->second.second);
         }
     }
     std::lock_guard lock(s.mutex);
     s.chat_view = std::move(view);
 }
-// The colour and tag a player gets, in chat and on their nametag.
-std::pair<std::uint32_t, std::string> player_role(Session &s, std::uint64_t sender, bool local) {
+std::pair<std::uint32_t, std::string> mark_role(IdentityList list) {
+    switch (list) {
+    case IdentityList::developer: return {nametag_developer, "Dev"};
+    case IdentityList::content_creator: return {nametag_creator, "Creator"};
+    case IdentityList::centrix: return {nametag_centrix, "Centrix"};
+    case IdentityList::staff: return {nametag_staff, "Staff"};
+    default: return {nametag_homie, "Homie"};
+    }
+}
+// The colour and tag a player gets, in chat and on their nametag. `marks` off leaves out who
+// the backend says they are: for a chat line that is not known to be theirs (chat proofs,
+// session_receive.cpp).
+std::pair<std::uint32_t, std::string> player_role(Session &s, std::uint64_t sender, bool local, bool marks) {
     if (!sender) return {};
     const bool dedicated = dedicated_host(s);
     if (dedicated && sender == s.host_id) return {nametag_admin, {}}; // the server itself
-    if (reskate_developer(sender)) return {nametag_developer, "Dev"};
     const auto *peer = local ? nullptr : find_peer(s, sender);
+    const bool vouched = local || (peer && steam_vouched(s, *peer));
+    // Who the backend says a player is comes before what they are in this lobby, unless they
+    // have turned their tag off (the Special page), which their appearance tells everyone.
+    if (marks && vouched && (local ? own_tag_shown() : shows_tag(*peer)))
+        if (const auto mark = identity_mark(sender)) return mark_role(*mark);
     if (dedicated && (local ? s.server_admin : peer && peer->member.admin)) return {nametag_admin, "Admin"};
     if (!dedicated && (local ? s.mode == Mode::host : sender == s.host_id)) return {nametag_host, "Host"};
-    if (!local) {
+    if (!local && vouched) {
         refresh_friends(s);
         if (std::binary_search(s.friend_ids.begin(), s.friend_ids.end(), sender)) return {nametag_friend, "Friend"};
     }
     return {nametag_white, {}};
 }
-void add_chat(Session &s, std::uint64_t sender, std::string name, std::string text, bool local) {
+void add_chat(Session &s, std::uint64_t sender, std::string name, std::string text, bool local, bool marks) {
     if (name.empty()) name = sender ? "Player" : "ReSkate";
-    auto [color, tag] = player_role(s, sender, local);
-    s.chat.push_back({++s.chat_sequence, sender, std::move(name), std::move(text), local, color, std::move(tag)});
+    auto [color, tag] = player_role(s, sender, local, marks);
+    s.chat.push_back({++s.chat_sequence, sender, now_us(), std::move(name), std::move(text), local, color, std::move(tag)});
     while (s.chat.size() > multiplayer_chat_history) s.chat.pop_front();
     publish_chat(s);
 }

@@ -9,6 +9,7 @@
 #include "Engine/Game/Build/addresses.h"
 #include "Engine/Game/Build/20260929/engine.h"
 #include "Engine/Game/Build/20260929/native_throwdowns.h"
+#include "Engine/Game/Build/supported_build.h"
 #include "Engine/Game/Multiplayer/session_tools.h"
 #include "native_throwdowns.h"
 #include "throwdown_relay.h"
@@ -202,6 +203,9 @@ struct Lab {
     std::vector<std::uint8_t> host_params; // ... and of its HostSetThrowdownParameters (the host's settings)
     std::string params_note;
     std::map<std::uint32_t, Address> types;
+    // Bumped when a level is left. The types above belong to the level; a heap scan begun
+    // before it was left found ones that are gone by the time it reports them.
+    std::atomic<std::uint64_t> world{};
     std::atomic<bool> type_scan_running{};     // prepare_throwdown_injection's worker
     std::atomic<std::uint64_t> type_scan_retry{}; // after a scan that missed some: not before this
     std::atomic<std::uint64_t> beacon_scan_retry{}; // the same for the party beacon events
@@ -1020,10 +1024,31 @@ struct Instance {
         reinterpret_cast<void (*)(Address, Address, const Address*)>(lab().base + throwdowns::send_event)(0, 0, arguments.data());
     }
 };
+// Whether `object` is the type object of the event `hash` right now. An event's type is
+// defined by data the level's bundles carry: it is freed when the level is left and made
+// again, anywhere, by the next one, and the memory the old one was in soon holds something
+// else. The game constructs an event by calling through its type record (type_construct
+// calls record+0x30), so a record that no longer names the event, or whose constructor is
+// not code, must never be handed to it.
+bool type_alive(Address object, std::uint32_t hash) {
+    Address record{}, construct{};
+    std::uint32_t name{};
+    if (!memory::peek(object, record) || !memory::peek(record, name) || name != hash ||
+        !memory::peek(record + 0x30, construct)) return false;
+    const auto base = lab().base;
+    if (construct >= base && construct - base < supported_build::game_image_size) return true;
+    MEMORY_BASIC_INFORMATION info{};
+    return VirtualQuery(reinterpret_cast<const void*>(construct), &info, sizeof(info)) && info.State == MEM_COMMIT &&
+        !(info.Protect & PAGE_GUARD) &&
+        (info.Protect & (PAGE_EXECUTE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY));
+}
 Address type_of(std::uint32_t hash) {
     std::lock_guard lock(lab().mutex);
     const auto it = lab().types.find(hash);
-    return it == lab().types.end() ? 0 : it->second;
+    if (it == lab().types.end()) return 0;
+    if (type_alive(it->second, hash)) return it->second;
+    lab().types.erase(it); // gone with the level it was found in; the next scan finds this level's
+    return 0;
 }
 std::string run_job(const Job& job) {
     auto& l = lab();
@@ -1326,13 +1351,15 @@ void remember_player(std::uint32_t id) {
         if (!current && slot.compare_exchange_strong(current, id)) return;
     }
 }
-// Type objects of the injected events; found on the heap once and cached.
+// Type objects of the injected events; found on the heap and kept until the level is left.
 std::string ensure_types(std::initializer_list<std::uint32_t> hashes) {
     std::vector<NativeTypeQuery> queries;
     for (const auto hash : hashes) if (!type_of(hash)) queries.push_back({hash, 0});
     if (queries.empty()) return {};
+    const auto world = lab().world.load(std::memory_order_acquire);
     const auto missing = find_native_types(queries);
     std::lock_guard lock(lab().mutex);
+    if (lab().world.load(std::memory_order_acquire) != world) return "the level changed while the event types were looked for";
     for (const auto& q : queries) if (q.object) lab().types[q.hash] = q.object;
     return missing ? std::format("{} event type(s) not found on the heap; is the game in the world?", missing) : std::string{};
 }
@@ -1875,6 +1902,9 @@ void pump_throwdown_lab(Address vm) noexcept {
     }
     if (!l.pending.load(std::memory_order_acquire)) return;
     profile_runtime::PreserveError preserve;
+    // A relay spawn that fails here never reaches the server: the relay is told, so the copy
+    // is dropped instead of waiting for an MMID that will not come.
+    std::uint64_t spawn_token{};
     try {
         if (realm() != client_realm) return;
         Job job{};
@@ -1884,13 +1914,28 @@ void pump_throwdown_lab(Address vm) noexcept {
             job = l.jobs.front(); l.jobs.pop_front();
             if (l.jobs.empty()) l.pending.store(false, std::memory_order_release);
         }
+        spawn_token = job.token;
         const auto result = run_job(job);
+        spawn_token = 0;
         logging::log(logging::Level::info, logging::Channel::progression, "Throwdown lab: {}.", result);
     } catch (const std::exception& e) {
         logging::log(logging::Level::warning, logging::Channel::progression, "Throwdown lab: injection failed: {}", e.what());
     } catch (...) {
         logging::write(logging::Level::warning, logging::Channel::progression, "Throwdown lab: injection failed.");
     }
+    if (spawn_token) throwdown_relay_spawned(spawn_token, 0, 0);
+}
+
+void throwdown_lab_before_level_transition(unsigned next) noexcept {
+    // 14, 22 and 3 leave a level or sublevel, 24 shuts down: the level's bundles are unloaded,
+    // and the events' types with them.
+    if (next != 14 && next != 22 && next != 3 && next != 24) return;
+    try {
+        auto& l = lab();
+        std::lock_guard lock(l.mutex);
+        l.world.fetch_add(1, std::memory_order_acq_rel);
+        l.types.clear();
+    } catch (...) {}
 }
 
 bool throwdown_lab_player(std::uint32_t player_id) noexcept {
@@ -1903,8 +1948,8 @@ namespace {
 constexpr std::array relay_events{event_debug_spawn, event_add_ai, event_force_start, event_destroy,
                                   event_remove_participant, event_player_score, event_request_turn_end,
                                   event_skate_submit, event_force_destroy};
-// The beacon events' types, looked for once in the background (only the local player's own
-// beacon would otherwise show them); retried while the world is still loading them.
+// The beacon events' types, looked for in the background in each level (only the local player's
+// own beacon would otherwise show them); retried while the world is still loading them.
 bool beacon_types_ready() {
     auto& l = lab();
     if (type_of(event_beacon_move) && type_of(event_beacon_despawn)) return true;

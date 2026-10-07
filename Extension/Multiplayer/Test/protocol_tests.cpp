@@ -331,8 +331,30 @@ void cosmetics_codec() {
                     {board_recipe_key, 1, {0x3f800000}, {{13, "Own_Deck", {7}}}}};
     const auto bytes = encode(p);
     const auto decoded = decode(bytes);
-    check(decoded && decoded->appearance == p.appearance,
+    check(decoded && decoded->appearance == p.appearance && !decoded->appearance.hide_tag && !decoded->appearance.hide_items,
           "Cosmetic fields or opaque parameter bits were lost");
+    // A player's choices to go without their backend tag, or its animated items, travel with
+    // their outfit, each on its own.
+    for (const auto &[tag, items] : {std::pair{true, false}, std::pair{false, true}, std::pair{true, true}}) {
+        auto hidden = p;
+        hidden.appearance.hide_tag = tag, hidden.appearance.hide_items = items;
+        const auto told = decode(encode(hidden));
+        check(told && told->appearance.hide_tag == tag && told->appearance.hide_items == items &&
+                  told->appearance == hidden.appearance && !(told->appearance == p.appearance),
+              "A player's choice to hide their tag or their items was lost");
+    }
+    // So does how they have each marked cosmetic animate.
+    auto styled = p;
+    styled.appearance.marks[0] = {MarkMode::gradient, {1, 2, 3}, {250, 251, 252}, 2};
+    styled.appearance.marks[4] = {MarkMode::off, {}, {}, 1};
+    styled.appearance.marks.back() = {MarkMode::solid, {9, 8, 7}, {}, 0};
+    const auto kept = decode(encode(styled));
+    check(kept && kept->appearance == styled.appearance && kept->appearance.marks[0].to[2] == 252 &&
+              kept->appearance.marks.back().mode == MarkMode::solid && kept->appearance.marks.back().from[0] == 9 &&
+              kept->appearance.marks[1] == MarkStyle{} && !(kept->appearance == p.appearance),
+          "A player's cosmetic styles were lost");
+    check(!valid_mark_style({static_cast<MarkMode>(4), {}, {}, 0}) && !valid_mark_style({MarkMode::standard, {}, {}, 3}),
+          "A cosmetic style no menu can make was accepted");
     for (std::size_t n = 0; n < bytes.size(); ++n)
         check(!decode(std::span(bytes).first(n)), "Truncated cosmetics accepted");
     auto corrupt = bytes;
@@ -699,6 +721,7 @@ void dedicated_server_codec() {
     roster.members = {{server, 10, "My server"}, {player, 20, "Skater", true}, {other, 30, "Other"}};
     roster.voice_range = 450;
     roster.guest_noclip = false;
+    roster.object_limit = 50;
     Packet teleport;
     teleport.kind = PacketKind::teleport; teleport.session = 9; teleport.epoch = 10; teleport.map = 11; teleport.source = server;
     teleport.teleport = {612.5f, 199.25f, -1075.75f};
@@ -722,6 +745,47 @@ void dedicated_server_codec() {
           "Server roster, admin flags or voice range lost");
     check(decoded && !decoded->guest_noclip && decoded->guest_no_bail && decoded->guest_boosts,
           "Guest noclip / No Bail / boost permissions lost");
+    // The limit on each player's objects rides in the roster too; one past the protocol's own is refused.
+    check(decoded && decoded->object_limit == 50, "The object limit was lost");
+    {
+        auto unlimited = roster;
+        unlimited.object_limit = 0;
+        const auto back = decode(encode(unlimited));
+        check(back && back->object_limit == 0, "No object limit did not stay none");
+        auto over = roster;
+        over.object_limit = dingosdk::max_object_limit + 1;
+        bool refused{};
+        try {
+            encode(over);
+        } catch (const std::exception &) {
+            refused = true;
+        }
+        check(refused, "An object limit past the protocol's was sent");
+        check(dingosdk::parse_object_limit("25") == 25U && dingosdk::parse_object_limit("off") == 0U &&
+                  dingosdk::parse_object_limit("1024") == 1024U && !dingosdk::parse_object_limit("1025") &&
+                  !dingosdk::parse_object_limit("") && !dingosdk::parse_object_limit("-1") && !dingosdk::parse_object_limit("ten"),
+              "Object limits were not read");
+        // What a host shows of a layout under a limit: what is already shown stays, the rest fills up in order.
+        const auto object = [](std::uint64_t id) {
+            dingosdk::NetworkObject value;
+            value.id = id;
+            value.item = "own_bk_test";
+            return value;
+        };
+        const auto ids = [](const std::vector<dingosdk::NetworkObject> &layout) {
+            std::vector<std::uint64_t> out;
+            for (const auto &entry : layout) out.push_back(entry.id);
+            return out;
+        };
+        const std::vector<dingosdk::NetworkObject> uploaded{object(1), object(2), object(3), object(4), object(5)};
+        std::map<std::uint64_t, dingosdk::NetworkObject> shown{{4, object(4)}, {5, object(5)}};
+        check(ids(limited_layout(uploaded, {}, 0)) == std::vector<std::uint64_t>{1, 2, 3, 4, 5} &&
+                  ids(limited_layout(uploaded, {}, 9)) == std::vector<std::uint64_t>{1, 2, 3, 4, 5},
+              "A layout within the limit was cut");
+        check(ids(limited_layout(uploaded, {}, 3)) == std::vector<std::uint64_t>{1, 2, 3}, "A layout over the limit was not cut to it");
+        check(ids(limited_layout(uploaded, shown, 3)) == std::vector<std::uint64_t>{4, 5, 1},
+              "Objects already shown lost their place to newer ones");
+    }
     // Parties ride in the roster: each has one leader and at least two members; a server is in none.
     auto party = roster;
     party.members[1].party = party.members[2].party = 7;
@@ -789,6 +853,19 @@ void dedicated_server_codec() {
     check(decode(encode(tuning)) && decode(encode(tuning))->tuning == tuning.tuning, "Physics tuning bytes lost");
     tuning.tuning.assign(max_physics_tuning + 1, 0);
     check(reject(tuning), "Oversized physics tuning encoded");
+    Packet extras;
+    extras.kind = PacketKind::physics_extras; extras.session = 9; extras.epoch = 10; extras.map = 11; extras.source = player;
+    check(decode(encode(extras)) && decode(encode(extras))->kind == PacketKind::physics_extras && decode(encode(extras))->extras.empty(),
+          "Empty physics extras (the game's own) lost");
+    extras.extras = {1, 0xde, 0xad, 0xbe, 0xef, 0, 0, 0x80, 0x3f};
+    check(decode(encode(extras)) && decode(encode(extras))->extras == extras.extras, "Physics extras bytes lost");
+    extras.extras.assign(dingosdk::max_physics_extras, 7);
+    check(decode(encode(extras)) && decode(encode(extras))->extras.size() == dingosdk::max_physics_extras, "The largest physics extras lost");
+    extras.extras.assign(dingosdk::max_physics_extras + 1, 0);
+    check(reject(extras), "Oversized physics extras encoded");
+    extras.extras = {1};
+    extras.source = 0;
+    check(reject(extras), "Physics extras from nobody encoded");
     auto moved = roster;
     moved.members = {{player, 20, "Skater"}, {server, 10, "My server"}};
     check(reject(moved), "A game server accepted as a guest");
@@ -839,6 +916,31 @@ void dedicated_server_codec() {
     maps.maps = {"Levels/Game/BAM_LevelRoot/BAM_LevelRoot", "Levels/Custom/bbcity/bbcity"};
     const auto map_list = decode_wire(encode_wire(maps));
     check(map_list && map_list->kind == PacketKind::maps && map_list->maps == maps.maps, "Server map list lost");
+    auto pooled = maps;
+    pooled.map_pool = {1, 0};
+    pooled.map_rotation = 20;
+    const auto pool_list = decode_wire(encode_wire(pooled));
+    check(pool_list && pool_list->map_pool == pooled.map_pool && pool_list->map_rotation == 20, "Server map pool or rotation lost");
+    Packet changed_map;
+    changed_map.kind = PacketKind::world_state; changed_map.session = 9; changed_map.epoch = 10; changed_map.source = server; changed_map.world = 2;
+    changed_map.destination = "Levels/Game/DingoLevel_Root/DingoLevel_Root|Levels/Game/dingolevel_reskate_momentumpark/x";
+    changed_map.map = map_hash(changed_map.destination);
+    changed_map.map_label = "Momentum Park";
+    const auto arrived = decode_wire(encode_wire(changed_map));
+    check(arrived && arrived->map_label == "Momentum Park" && arrived->destination == changed_map.destination,
+          "The map's name lost from a map change");
+    auto unnamed = changed_map;
+    unnamed.map_label.assign(max_member_name + 1, 'a');
+    check(reject(unnamed), "An overlong map name encoded");
+    auto stray = maps;
+    stray.map_pool = {2};
+    check(reject(stray), "A map pool entry past the map list encoded");
+    auto twice = maps;
+    twice.map_pool = {0, 0};
+    check(reject(twice), "A map listed twice in the pool encoded");
+    auto endless = maps;
+    endless.map_rotation = dingosdk::max_map_rotation + 1;
+    check(reject(endless), "An overlong map rotation encoded");
     auto piped = maps;
     piped.maps[0] = "Levels/Game/DingoLevel_Root/DingoLevel_Root|Levels/Game/BAM_LevelRoot/BAM_LevelRoot";
     check(reject(piped), "A destination encoded as a server map");
@@ -856,6 +958,17 @@ void dedicated_server_codec() {
     check(row && row->dedicated && row->name == "Big  friendly server" && row->map == ad.map && row->players == 3 &&
               row->capacity == 16 && row->password_required && row->code == format_invite({server, ad.secret}),
           "Server tags did not round trip");
+    // A whole last character is kept, and one the byte limit cuts through is dropped whole.
+    const auto accented = read_server_tags(dingosdk::server::server_tags({"Skate Caf\xC3\xA9", "Caf\xC3\xA9", 1, 8, false, true, 1}), server);
+    check(accented && accented->name == "Skate Caf\xC3\xA9" && accented->map == "Caf\xC3\xA9",
+          "A server name lost its non-ASCII last letter");
+    for (std::size_t lead = 0; lead < 3; ++lead) {
+        std::string euros(lead, 'a');
+        for (int i = 0; i < 50; ++i) euros += "\xE2\x82\xAC";
+        const auto cut = dingosdk::server::server_tags({euros, "Caf\xC3\xA9", 1, 8, false, true, 1});
+        const auto name = cut.substr(cut.find(",n") + 2);
+        check(cut.size() < 128 && name.size() > lead && (name.size() - lead) % 3 == 0, "A server name was cut inside a character");
+    }
     check(!read_server_tags(tags, player), "A player's ID read as a server");
     check(!read_server_tags("reskate,v1,k1,c4", server), "An incompatible server version listed");
 }

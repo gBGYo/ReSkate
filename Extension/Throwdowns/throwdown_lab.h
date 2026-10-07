@@ -17,6 +17,9 @@ void initialize_throwdown_lab(std::uintptr_t base) noexcept;
 // Called after every authored expression (vm = the expression that just ran); sends
 // queued events from the client realm and reads results off server graphs.
 void pump_throwdown_lab(std::uintptr_t vm) noexcept;
+// Before the game changes level state to `next`: forgets the event types found in a level that
+// is being left, which are freed with it.
+void throwdown_lab_before_level_transition(unsigned next) noexcept;
 // Called by the SendNetworkedEvent hook for every event the local client sends.
 void observe_throwdown_send(std::uint32_t hash, std::uintptr_t type, std::uintptr_t payload) noexcept;
 // True for ids the lab put into a throwdown; the UI player lookups answer them with

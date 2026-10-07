@@ -25,6 +25,8 @@ constexpr std::uintptr_t slot_highest = memory::highest_user_address;
 constexpr std::uint32_t slot_target_count = 10;
 constexpr std::uint32_t free_slot_count = 3;
 constexpr std::size_t slot_entry_size = 0x48;
+// How long the first selection waits for saved outfits to become loadable.
+constexpr std::uint64_t selection_wait_limit_ms = 60000;
 
 using SlotSettingsLookup = std::uintptr_t (*)(std::uintptr_t, const void*);
 using SlotNativeResize = void (*)(std::uintptr_t, std::uint32_t);
@@ -146,6 +148,9 @@ struct SlotOverrideState {
     bool active{};
     bool requested{};
     std::array<SlotLease, slot_field_specs.size()> leases{};
+    // The manager whose first selection is waiting on saved outfits, and since when.
+    std::uintptr_t waiting_manager{};
+    std::uint64_t waiting_since{};
     SkaterSlotOverrideObservation observation;
 };
 
@@ -453,7 +458,7 @@ void maintain_slot_count(SlotOverrideState& state) {
     state.observation.status = "Restored ten process-local skater preset slots.";
 }
 
-void maintain_initial_selection(SlotOverrideState& state, std::uint32_t preferred) {
+void maintain_initial_selection(SlotOverrideState& state, std::uint32_t preferred, bool outfits_loadable) {
     auto& observation = state.observation;
     observation.initial_binding_ready = observation.initial_appearance_ready = false;
     observation.initial_category_count = 0;
@@ -471,6 +476,23 @@ void maintain_initial_selection(SlotOverrideState& state, std::uint32_t preferre
         memory::read(categories - 4, category_count)) observation.initial_category_count = category_count & 0x7fffffff;
     if (!observation.initial_appearance_ready || !observation.initial_category_count ||
         observation.initial_category_count > 64) return;
+    // Selecting a slot makes the game build every slot up to it there and then,
+    // each from its saved outfit or, when that cannot be loaded, as a standard
+    // skater; it does not ask again until the next level. So the selection
+    // waits until saved outfits can be loaded. A catalog that never turns up
+    // must not leave the player with no slot at all, hence the limit.
+    if (!outfits_loadable) {
+        const auto now = GetTickCount64();
+        if (state.waiting_manager != manager.manager) {
+            state.waiting_manager = manager.manager;
+            state.waiting_since = now;
+        }
+        if (now - state.waiting_since < selection_wait_limit_ms) {
+            observation.status = "Waiting for the cosmetics catalog before restoring the saved skater.";
+            return;
+        }
+    }
+    state.waiting_manager = 0;  // the next level's manager can be given this one's address
     // The first native selection restores the requested saved preset, or slot 0.
     // It constructs any missing slots from the loaded appearance
     // categories. With previous index -1, it does not save a previous preset or
@@ -550,6 +572,8 @@ bool initialize_skater_slot_override(
     state.active = authored_offline_route_active && validate_slot_image(image_base);
     state.requested = false;
     state.leases = {};
+    state.waiting_manager = 0;
+    state.waiting_since = 0;
     state.observation = {};
     state.observation.initialized = true;
     state.observation.available = state.active;
@@ -564,7 +588,7 @@ bool initialize_skater_slot_override(
 }
 
 SkaterSlotOverrideObservation update_skater_slot_override(
-    SkaterSlotOverrideAction action, std::uint32_t initial_preset) noexcept {
+    SkaterSlotOverrideAction action, std::uint32_t initial_preset, bool outfits_loadable) noexcept {
     SlotLastErrorScope preserve_error;
     auto& state = slot_override_state();
     std::scoped_lock lock(state.mutex);
@@ -591,7 +615,7 @@ SkaterSlotOverrideObservation update_skater_slot_override(
         } else if (state.requested) {
             apply_slot_settings(state);
             maintain_slot_count(state);
-            maintain_initial_selection(state, initial_preset);
+            maintain_initial_selection(state, initial_preset, outfits_loadable);
         }
     } catch (const SlotFailure& failure) {
         ++state.observation.rejected;

@@ -303,7 +303,7 @@ void update_map_markers() {
         auto &marker = s.markers[slot];
         const auto record = published->slot_record(slot);
         const auto value = record ? target(record->player.id) : std::optional<Target>{};
-        // Party markers are for the local player's party (a lobby is one party); everyone
+        // Party markers are for the local player's party; everyone
         // else shows as the game's plain player dot (native_player_ui.cpp).
         if (!value || !available(*value) || !record->player.member) { remove(marker); continue; }
         if (marker.id != record->player.id || marker.epoch != record->player.epoch ||

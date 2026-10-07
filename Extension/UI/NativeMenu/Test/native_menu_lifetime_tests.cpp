@@ -3,9 +3,13 @@
 #include <array>
 #include <map>
 #include <stdexcept>
+#include <string>
+#include <vector>
 
 using dingosdk::multiplayer::menu_data::OwnedMenuModels;
 using dingosdk::multiplayer::menu_data::MenuLifetime;
+using dingosdk::multiplayer::menu_data::MenuAction;
+using dingosdk::multiplayer::menu_data::action_slot;
 struct Model { unsigned handle, type; };
 void check(bool value, const char* message) { if (!value) throw std::runtime_error(message); }
 
@@ -136,10 +140,51 @@ void native_transition_without_load_request() {
         check(lifetime.blocked() && destroyed == 4, "Shutdown during loading must not release roots twice");
     }
 }
+void action_slots() {
+    // A page's buttons, rendered the way the menu does it: every button asks for
+    // its command's slot on every pass, and a map load starts a new generation.
+    constexpr std::size_t capacity = 8;
+    std::array<MenuAction, capacity> actions;
+    std::size_t used{};
+    std::uint64_t pass{}, generation{};
+    const auto ask = [&](std::string command, std::string argument = {}) {
+        const auto slot = action_slot(used, capacity, [&](std::size_t i) -> const MenuAction& { return actions[i]; },
+            command, argument, pass);
+        if (!slot) return capacity;
+        actions[*slot] = {generation, std::move(command), std::move(argument), pass};
+        if (*slot == used) ++used;
+        return *slot;
+    };
+    const auto render = [&](std::initializer_list<const char*> buttons) {
+        ++pass;
+        std::vector<std::size_t> slots;
+        for (const auto* button : buttons) slots.push_back(ask("load", button));
+        return slots;
+    };
+    const auto first = render({"a", "b", "c", "d", "e", "f"});
+    check(used == 6 && first == std::vector<std::size_t>{0, 1, 2, 3, 4, 5}, "Each command takes the next unused slot");
+    // Fifteen map loads filled the table when every generation took new slots.
+    for (unsigned load = 0; load < 100; ++load) {
+        ++generation;
+        check(render({"a", "b", "c", "d", "e", "f"}) == first && used == 6,
+            "The same buttons after a map load keep their slots");
+        check(actions[0].generation == generation, "A kept slot belongs to the menu that is up now");
+    }
+    // A list whose rows change (lobbies, players): the slots of rows that went away are reused.
+    check(render({"a", "b", "c", "d", "e", "f", "g", "h"}).back() == 7 && used == capacity, "The table can fill");
+    check(render({"a", "b", "c", "d", "e", "f", "g", "h"}).back() == 7, "A full table still serves the commands it holds");
+    check(ask("load", "i") == capacity, "A slot a button asked for in this pass or the last is not given away");
+    render({"a", "b", "c", "d", "e", "f"});
+    check(ask("load", "i") == capacity, "One pass without its button is not enough: the pass may not be over");
+    const auto later = render({"a", "b", "c", "d", "e", "f", "i"});
+    check(later.back() == 6 && actions[6].argument == "i", "A slot no button has asked for is handed to a new command");
+    check(render({"a", "b", "c", "d", "e", "f", "i", "g"}).back() == 7 && actions[7].argument == "g",
+        "A command that lost its slot gets another when its button returns");
+}
 int main() {
     try {
-        map_transition(); interrupted_cleanup(); window_close(); native_transition_without_load_request();
-        std::puts("Native menu lifetime: scheduled/native transitions, blocked callbacks, reload, shutdown, partial builds and retries passed.");
+        map_transition(); interrupted_cleanup(); window_close(); native_transition_without_load_request(); action_slots();
+        std::puts("Native menu lifetime: scheduled/native transitions, blocked callbacks, reload, shutdown, partial builds, retries and action slots passed.");
         return 0;
     } catch (const std::exception& e) {
         std::fprintf(stderr, "%s\n", e.what()); return 1;

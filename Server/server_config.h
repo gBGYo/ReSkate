@@ -33,11 +33,18 @@ struct ServerConfig {
     // The map everyone skates, named like the game's `load` command: "San Vansterdam",
     // "Isle of Grom", or a custom map in Mods\ such as "bbcity".
     std::string map = "San Vansterdam";
+    std::vector<std::string> map_pool; // maps for votes and the rotation, in order; empty: every map
+    unsigned map_rotation = 0;         // minutes per map before the next pool map (0: off)
     unsigned max_players = 16; // players; the server itself is not one
     std::string password;      // empty: anyone may join
     std::string welcome;       // sent to each player as they join
     bool listed = true;        // shown in the in-game server browser
+    // A Steam game server login token (steamcommunity.com/dev/managegameservers, app 3354750).
+    // With one the server signs in to its own account and keeps the same Steam ID every start,
+    // which is how the ReSkate team's list of official servers knows it. Empty: anonymous.
+    std::string steam_token;
     bool auto_update = true;   // install new releases when nobody is on
+    bool global_bans = true;   // turn away players the ReSkate team has banned (global_bans.h)
     bool activity_log = true;  // console lines for throwdowns, objects and loading
     bool announce_throwdowns = true; // tell everyone in chat when a throwdown drop is placed
     // Players form parties (/party, the game's Social menu): 2-8 players each (the game's Party
@@ -61,6 +68,8 @@ struct ServerConfig {
     MultiplayerDistances distances;
     // everyone, admins (only the admins below may build) or nobody.
     ObjectPlacement object_placement = ObjectPlacement::everyone;
+    // Objects each player may have placed (object_placement.h); 0: no limit. Admins are not held to it.
+    unsigned object_limit = default_object_limit;
     // Whether players may use noclip (and teleport) / No Bail / the boosts (admins always may).
     bool noclip = true, no_bail = true, boosts = true;
     // Players skate with the game's own physics tuning, not copies they edited.
@@ -106,4 +115,7 @@ std::string map_destination(std::string_view map);
 std::string map_setting(std::string_view map);
 // A map's name for people: "San Vansterdam".
 std::string map_label(std::string_view map);
+std::vector<const ServerLevel *> pool_levels(const ServerConfig &config); // known pool maps once each; all when empty
+bool in_map_pool(const ServerConfig &config, std::string_view map);
+const ServerLevel *next_pool_map(const ServerConfig &config, std::string_view map); // after `map`; null if no other
 } // namespace dingosdk::server

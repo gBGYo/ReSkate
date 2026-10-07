@@ -2,11 +2,14 @@
 // in-game server browser. Runs from its own folder, next to steam_api64.dll and
 // the Steam client files (steamclient64.dll, tier0_s64.dll, vstdlib_s64.dll).
 // On Linux the Steam files are libsteam_api.so and steamclient.so.
+#include "global_bans.h"
 #include "server_config.h"
 #include "server_host.h"
 #include "server_update.h"
+#include "Extension/Multiplayer/developer_identity.h"
 #include "steam_server.h"
 #include "Extension/Multiplayer/Session/monotonic_clock.h"
+#include "Engine/Core/Platform/path_text.h"
 #include "Engine/Core/Text/word_filter.h"
 #include "Engine/Game/World/world_layer_catalog.h"
 #include "Engine/Game/World/world_names.h"
@@ -23,6 +26,7 @@
 #endif
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdio>
 #include <ctime>
 #include <deque>
@@ -44,6 +48,57 @@ constexpr int restart_for_update = -2;
 std::string update_version;
 std::mutex log_mutex;
 std::ofstream log_file;
+// The console is written by a thread of its own. Windows holds a console's output while text
+// in its window is selected, and a pipe nobody reads fills up: whoever writes then waits. When
+// that was the server loop, the server read nothing from its players until the console let go,
+// and they were gone by then. The log file is still written where the line is made.
+struct Console {
+    std::mutex mutex;
+    std::condition_variable more, drained;
+    std::deque<std::string> lines;
+    std::size_t skipped{};
+    bool writing{}, started{};
+    void write(std::string line) {
+        std::lock_guard lock(mutex);
+        if (!started) {
+            started = true;
+            std::thread([this] { run(); }).detach();
+        }
+        // A console that stays held must not grow this without end: the oldest lines go, and
+        // the file has them all.
+        if (lines.size() >= 4096) {
+            lines.pop_front();
+            ++skipped;
+        }
+        lines.push_back(std::move(line));
+        more.notify_one();
+    }
+    void run() {
+        for (;;) {
+            std::unique_lock lock(mutex);
+            more.wait(lock, [&] { return !lines.empty(); });
+            const auto line = std::move(lines.front());
+            lines.pop_front();
+            const auto missed = std::exchange(skipped, 0);
+            writing = true;
+            lock.unlock();
+            if (missed) std::printf("(%zu earlier lines are only in ReSkateServer.log: the console was not taking output)\n", missed);
+            std::fputs(line.c_str(), stdout);
+            lock.lock();
+            writing = false;
+            if (lines.empty()) drained.notify_all();
+        }
+    }
+    // Waits until everything written so far is on screen, but not for a console that is held.
+    void flush(std::chrono::milliseconds limit) {
+        std::unique_lock lock(mutex);
+        drained.wait_for(lock, limit, [&] { return lines.empty() && !writing; });
+    }
+};
+Console &console() {
+    static auto *value = new Console; // outlives every thread that may still be writing at exit
+    return *value;
+}
 void write_log(const std::string &text) {
     std::lock_guard lock(log_mutex);
     const auto now = std::time(nullptr);
@@ -55,8 +110,8 @@ void write_log(const std::string &text) {
 #endif
     char stamp[32]{};
     std::strftime(stamp, sizeof stamp, "%Y-%m-%d %H:%M:%S", &local);
-    std::printf("[%s] %s\n", stamp + 11, text.c_str());
     if (log_file) log_file << '[' << stamp << "] " << text << std::endl;
+    console().write(std::string("[") + (stamp + 11) + "] " + text + "\n");
 }
 std::atomic<bool> finished{};
 #ifdef _WIN32
@@ -138,6 +193,9 @@ struct Input {
             }
             for (ssize_t i = 0; i < count; ++i) {
                 if (buffer[i] == '\n') {
+                    // CRLF input (a script saved on Windows, a panel or telnet): without
+                    // this, "quit\r" is an unknown command and the server keeps running.
+                    if (!pending.empty() && pending.back() == '\r') pending.pop_back();
                     std::lock_guard lock(mutex);
                     lines.push_back(pending);
                     pending.clear();
@@ -171,6 +229,16 @@ Input &console_input() {
     return input;
 }
 constexpr auto update_interval = std::chrono::minutes(30);
+#ifdef _WIN32
+// Double-clicked, the server is alone on a visible console that closes with it.
+// From a terminal, a script, a hosting panel or a hidden scheduled task it is not.
+bool own_window() {
+    DWORD processes[2]{};
+    const auto window = GetConsoleWindow();
+    return GetConsoleProcessList(processes, 2) == 1 && window && IsWindowVisible(window) &&
+           GetFileType(GetStdHandle(STD_INPUT_HANDLE)) == FILE_TYPE_CHAR;
+}
+#endif
 } // namespace
 
 #ifdef _WIN32
@@ -206,6 +274,9 @@ int run(int argc, char **argv, bool skip_update) {
     setvbuf(stdout, nullptr, _IONBF, 0);
     std::signal(SIGINT, on_signal);
     std::signal(SIGTERM, on_signal);
+    // A hosting panel that dies leaves stdout a pipe with no reader. Without this
+    // the next printf kills the server before it logs, saves or signs out of Steam.
+    std::signal(SIGPIPE, SIG_IGN);
     const auto here = folder();
     if (argc == 4 && std::string(argv[1]) == "--export-world-layers") {
         try {
@@ -232,24 +303,31 @@ int run(int argc, char **argv, bool skip_update) {
         const bool fresh = !std::filesystem::exists(config_file);
         std::vector<std::string> added;
         config = load_config(config_file, &added);
-        if (fresh) write_log("Wrote a default " + config_file.filename().string() + ". Edit it to name the server and add admins.");
+        if (fresh) write_log("Wrote a default " + path_utf8(config_file.filename()) + ". Edit it to name the server and add admins.");
         if (!added.empty()) {
             std::string names;
             for (const auto &name : added) names += (names.empty() ? "" : ", ") + name;
-            write_log("Added new settings to " + config_file.filename().string() + " with their defaults: " + names + ".");
+            write_log("Added new settings to " + path_utf8(config_file.filename()) + " with their defaults: " + names + ".");
         }
     } catch (const std::exception &e) {
-        write_log("Cannot read " + config_file.string() + ": " + e.what());
+        write_log("Cannot read " + path_utf8(config_file) + ": " + e.what());
         return 1;
     }
     // Maps: the retail ones and custom maps from Mods\<mod>\reskate-levels.json.
     for (const auto &problem : load_levels(here / "Mods")) write_log("Mods: skipped " + problem);
     if (levels().size() > 6) write_log("Mods: " + std::to_string(levels().size() - 6) + " custom map(s).");
     // Older configs name the map by its full destination; keep the plain name instead.
+    bool renamed{};
     if (const auto setting = map_setting(config.map); setting != config.map && !setting.empty()) {
         config.map = setting;
-        try { save_config(config); } catch (...) {}
+        renamed = true;
     }
+    for (auto &map : config.map_pool) // short pool names ("isle") are saved in full
+        if (const auto *level = find_level(map); level && level->name != map) {
+            map = level->name;
+            renamed = true;
+        }
+    if (renamed) try { save_config(config); } catch (...) {}
     if (const auto error = config_error(config); !error.empty()) {
         write_log("Config problem: " + error);
         return 1;
@@ -287,16 +365,19 @@ int run(int argc, char **argv, bool skip_update) {
 
     SteamServer steam;
     std::string error;
-    if (!steam.start(here, config.port, config.query_port, error)) {
+    if (!steam.start(here, config.port, config.query_port, config.steam_token, error)) {
         write_log(error);
         return 1;
     }
-    write_log("Signing in to Steam...");
+    write_log(config.steam_token.empty() ? "Signing in to Steam..." : "Signing in to Steam with steam_token...");
     const auto login_started = std::chrono::steady_clock::now();
     while (!steam.logged_on() && !stopping) {
         steam.run_callbacks();
         if (std::chrono::steady_clock::now() - login_started > std::chrono::seconds(60)) {
-            write_log("Steam sign-in timed out after 60 s. Check the internet connection and try again.");
+            write_log(config.steam_token.empty()
+                          ? "Steam sign-in timed out after 60 s. Check the internet connection and try again."
+                          : "Steam sign-in timed out after 60 s. Steam may not have accepted steam_token: it must be a token for "
+                            "app 3354750 that no other running server is using. Or check the internet connection.");
             return 1;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(20));
@@ -314,8 +395,14 @@ int run(int argc, char **argv, bool skip_update) {
         return 1;
     }
     write_log(config.name + " is up on " + host.map_name() + " for " + std::to_string(config.max_players) + " players.");
-    write_log("Steam ID " + std::to_string(steam.steam_id()) + ", public IP " + steam.public_ip() + ".");
+    write_log("Steam ID " + std::to_string(steam.steam_id()) +
+              (config.steam_token.empty() ? " (anonymous: new every start; set steam_token to keep one)" : " (from steam_token: the same every start)") +
+              ", public IP " + steam.public_ip() + ".");
     write_log("Join code: " + host.invite() + (config.password.empty() ? "" : " (password required)"));
+    if (config.steam_token.empty() && config.listed)
+        write_log("No steam_token: the server browser can be set to show only servers that have one, and then "
+                  "this server is not in it (players can still join with the code). It takes a minute to make "
+                  "one: see steam_token in README.");
     write_log(config.admins.empty() ? "No admins yet: type \"admin add <SteamID64>\" to add one."
                               : std::to_string(config.admins.size()) + " admin(s). Type help for commands.");
 
@@ -325,9 +412,16 @@ int run(int argc, char **argv, bool skip_update) {
 #endif
     auto next_advertise = std::chrono::steady_clock::now();
     std::optional<bool> name_allowed; // last seen: whether the name may be listed
+    bool tokens_required{};           // last seen: whether the browser wants a steam_token
     auto next_update_check = next_advertise + update_interval;
     std::future<UpdateCheck> update_check;
     bool update_now{}, update_waiting{}, restart{};
+    // The backend's ban list (global_bans.h): read now and every ten minutes, a minute after a
+    // failure. "global_bans": false leaves it unread and lets those players in.
+    std::future<BanListCheck> ban_check;
+    auto next_ban_check = next_advertise;
+    bool bans_unread{};
+    if (!config.global_bans) write_log("Global bans are off (\"global_bans\": false): only this server's own bans apply.");
     while (!stopping && !restart) {
         steam.run_callbacks();
         try {
@@ -382,12 +476,33 @@ int run(int argc, char **argv, bool skip_update) {
             }
             update_now = false;
         }
+        if (config.global_bans && !ban_check.valid() && now_time >= next_ban_check)
+            ban_check = std::async(std::launch::async, read_global_bans);
+        if (ban_check.valid() && ban_check.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+            const auto check = ban_check.get();
+            next_ban_check = now_time + (check.ok ? std::chrono::minutes(10) : std::chrono::minutes(1));
+            // Said when it changes, not every ten minutes.
+            if (check.ok && (check.changed || bans_unread))
+                write_log("Global bans: " + std::to_string(check.banned) + " player(s) banned from ReSkate multiplayer cannot join.");
+            else if (!check.ok && !bans_unread)
+                write_log("The global ban list could not be read (" + check.problem + "). Trying again every minute; " +
+                          "until then the bans already read hold.");
+            bans_unread = !check.ok;
+        }
         if (update_waiting && !restart && host.players() == 0) {
             write_log("Nobody is on; restarting to install server update " + update_version + ".");
             restart = true;
         }
         if (const auto now = std::chrono::steady_clock::now(); now >= next_advertise) {
             next_advertise = now + std::chrono::seconds(2);
+            // The ReSkate team's rule, read with its ban list: say when it starts or stops hiding this server.
+            if (const bool required = multiplayer::server_tokens_required(); required != tokens_required) {
+                tokens_required = required;
+                if (config.steam_token.empty() && config.listed)
+                    write_log(required ? "The server browser now shows only servers with a steam_token, so this server is "
+                                         "hidden from it. Add a steam_token (see README) to be listed again."
+                                       : "The server browser shows servers without a steam_token again.");
+            }
             // A name with a bad word in it is never listed (clients hide one too); the
             // server still runs and players can join with its code.
             const bool allowed = !text::contains_bad_words(config.name);
@@ -413,6 +528,7 @@ int run(int argc, char **argv, bool skip_update) {
     input.shutdown();
 #endif
     if (update_check.valid()) update_check.wait();
+    if (ban_check.valid()) ban_check.wait();
     write_log(restart ? "Restarting for an update." : "Shutting down.");
     host.stop(restart ? "The server is restarting for an update. Rejoin in a minute." : "The server is shutting down.");
     // Leaving scope closes the networking before Steam itself shuts down.
@@ -431,6 +547,7 @@ int wmain(int argc, wchar_t **argv) {
             write_log("Installing server update " + update_version + "...");
             install_update(folder());
             write_log("Server update " + update_version + " installed; starting it.");
+            console().flush(std::chrono::seconds(2));
             if (relaunch()) {
                 code = 0;
                 break;
@@ -444,6 +561,15 @@ int wmain(int argc, wchar_t **argv) {
         }
     }
     finished = true;
+    // Keep a failure on screen until the host has read it, instead of the window
+    // vanishing with it. Closing the window or Ctrl+C still ends it at once.
+    if (code != 0 && !stopping && own_window()) {
+        auto &input = console_input();
+        input.take();
+        console().write("Press Enter to close.\n");
+        while (!stopping && input.take().empty()) Sleep(50);
+    }
+    console().flush(std::chrono::seconds(2));
     return code;
 }
 #else
@@ -457,6 +583,7 @@ int main(int argc, char **argv) {
             write_log("Installing server update " + update_version + "...");
             install_update(folder());
             write_log("Server update " + update_version + " installed; starting it.");
+            console().flush(std::chrono::seconds(2));
             if (relaunch()) {
                 code = 0;
                 break;
@@ -470,6 +597,7 @@ int main(int argc, char **argv) {
         }
     }
     finished = true;
+    console().flush(std::chrono::seconds(2));
     return code;
 }
 #endif

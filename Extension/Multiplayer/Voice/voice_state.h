@@ -29,11 +29,13 @@ inline bool valid_voice(const VoiceData &voice) noexcept {
         std::isfinite(voice.distance) && (voice.distance == 0.f ||
         (voice.distance >= min_hearing_distance && voice.distance <= max_hearing_distance));
 }
+// One speaker per second. Steam's compressed voice is a few kilobytes a second, captured about
+// fifty times a second: this leaves several times that and no more, since a host relays it all.
 struct VoiceBudget {
     std::uint64_t since{}, bytes{}, packets{};
     bool accept(std::uint64_t now, std::size_t size) noexcept {
         if (now < since || now - since >= 1000000) { since = now; bytes = packets = 0; }
-        if (!size || size > max_voice_bytes || packets >= 80 || bytes + size > 96 * 1024) return false;
+        if (!size || size > max_voice_bytes || packets >= 80 || bytes + size > 32 * 1024) return false;
         ++packets; bytes += size;
         return true;
     }

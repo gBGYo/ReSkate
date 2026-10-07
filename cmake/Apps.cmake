@@ -44,10 +44,54 @@ if(DINGOSDK_BUILD_LAUNCHER_TESTS AND WIN32)
     add_executable(dingosdk_mod_scoring_tests Engine/Vfs/Test/mod_scoring_tests.cpp)
     target_link_libraries(dingosdk_mod_scoring_tests PRIVATE dingosdk_mods)
     add_test(NAME mod_scoring COMMAND dingosdk_mod_scoring_tests "${DINGOSDK_TEST_GAME_ROOT}")
+    add_executable(dingosdk_mod_music_tests Engine/Vfs/Test/mod_music_tests.cpp)
+    target_link_libraries(dingosdk_mod_music_tests PRIVATE dingosdk_mods)
+    target_include_directories(dingosdk_mod_music_tests PRIVATE "${PROJECT_SOURCE_DIR}")
+    add_test(NAME mod_music COMMAND dingosdk_mod_music_tests)
+    add_executable(dingosdk_music_safety_tests Extension/Music/Test/local_music_safety_tests.cpp)
+    target_include_directories(dingosdk_music_safety_tests PRIVATE "${PROJECT_SOURCE_DIR}")
+    dingosdk_configure_target(dingosdk_music_safety_tests)
+    add_test(NAME music_safety COMMAND dingosdk_music_safety_tests)
+    add_executable(dingosdk_music_playback_policy_tests Extension/Music/Test/local_music_playback_policy_tests.cpp)
+    target_include_directories(dingosdk_music_playback_policy_tests PRIVATE "${PROJECT_SOURCE_DIR}")
+    dingosdk_configure_target(dingosdk_music_playback_policy_tests)
+    add_test(NAME music_playback_policy COMMAND dingosdk_music_playback_policy_tests)
+    add_executable(dingosdk_music_shelf_lifetime_tests Extension/Music/Test/local_music_shelf_lifetime_tests.cpp)
+    target_include_directories(dingosdk_music_shelf_lifetime_tests PRIVATE "${PROJECT_SOURCE_DIR}")
+    dingosdk_configure_target(dingosdk_music_shelf_lifetime_tests)
+    add_test(NAME music_shelf_lifetime COMMAND dingosdk_music_shelf_lifetime_tests)
+    add_executable(dingosdk_music_artwork_tests Extension/Music/Test/music_artwork_tests.cpp Extension/Music/music_artwork.cpp)
+    target_link_libraries(dingosdk_music_artwork_tests PRIVATE dingosdk_mods ws2_32 winhttp)
+    dingosdk_configure_target(dingosdk_music_artwork_tests)
+    add_test(NAME music_artwork COMMAND dingosdk_music_artwork_tests)
     add_executable(dingosdk_mod_merge_unshift_tests Engine/Vfs/Test/mod_merge_unshift_tests.cpp)
     target_link_libraries(dingosdk_mod_merge_unshift_tests PRIVATE dingosdk_mods)
     target_include_directories(dingosdk_mod_merge_unshift_tests PRIVATE "${PROJECT_SOURCE_DIR}")
     add_test(NAME mod_merge_unshift COMMAND dingosdk_mod_merge_unshift_tests)
+    add_executable(dingosdk_chunk_metadata_merge_tests Engine/Vfs/Test/chunk_metadata_merge_tests.cpp)
+    target_link_libraries(dingosdk_chunk_metadata_merge_tests PRIVATE dingosdk_mods)
+    target_include_directories(dingosdk_chunk_metadata_merge_tests PRIVATE "${PROJECT_SOURCE_DIR}")
+    add_test(NAME chunk_metadata_merge COMMAND dingosdk_chunk_metadata_merge_tests)
+    add_executable(dingosdk_mod_merge_added_assets_tests Engine/Vfs/Test/mod_merge_added_assets_tests.cpp)
+    target_link_libraries(dingosdk_mod_merge_added_assets_tests PRIVATE dingosdk_mods)
+    target_include_directories(dingosdk_mod_merge_added_assets_tests PRIVATE "${PROJECT_SOURCE_DIR}")
+    add_test(NAME mod_merge_added_assets COMMAND dingosdk_mod_merge_added_assets_tests)
+    add_executable(dingosdk_item_list_merge_tests Engine/Vfs/Test/item_list_merge_tests.cpp)
+    target_link_libraries(dingosdk_item_list_merge_tests PRIVATE dingosdk_mods)
+    target_include_directories(dingosdk_item_list_merge_tests PRIVATE "${PROJECT_SOURCE_DIR}")
+    add_test(NAME item_list_merge COMMAND dingosdk_item_list_merge_tests "${DINGOSDK_TEST_GAME_ROOT}")
+    add_executable(dingosdk_ebx_merge_tests Engine/Vfs/Test/ebx_merge_tests.cpp)
+    target_link_libraries(dingosdk_ebx_merge_tests PRIVATE dingosdk_mods)
+    target_include_directories(dingosdk_ebx_merge_tests PRIVATE "${PROJECT_SOURCE_DIR}")
+    add_test(NAME ebx_merge COMMAND dingosdk_ebx_merge_tests)
+    add_executable(dingosdk_mod_merge_audit_tests Engine/Vfs/Test/mod_merge_audit_tests.cpp)
+    target_link_libraries(dingosdk_mod_merge_audit_tests PRIVATE dingosdk_mods)
+    target_include_directories(dingosdk_mod_merge_audit_tests PRIVATE "${PROJECT_SOURCE_DIR}")
+    add_test(NAME mod_merge_audit COMMAND dingosdk_mod_merge_audit_tests "${DINGOSDK_TEST_GAME_ROOT}")
+    add_executable(dingosdk_store_copies_tests Engine/Vfs/Test/store_copies_tests.cpp)
+    target_link_libraries(dingosdk_store_copies_tests PRIVATE dingosdk_mods dingosdk_content_cache)
+    target_include_directories(dingosdk_store_copies_tests PRIVATE "${PROJECT_SOURCE_DIR}")
+    add_test(NAME store_copies COMMAND dingosdk_store_copies_tests "${DINGOSDK_TEST_GAME_ROOT}")
 endif()
 
 if(WIN32)
@@ -116,10 +160,11 @@ endif()
 
 # ReSkate dedicated server: a headless session host. It runs from its own folder
 # next to steam_api64.dll and the Steam client files; no game install needed.
-# On Linux next to libsteam_api.so; self-update is disabled there (see server_update.cpp).
+# On Linux next to libsteam_api.so; it updates itself there too, with the machine's curl and tar.
 add_executable(dingosdk_server Server/main.cpp Server/server_host.cpp Server/server_party.cpp
     Extension/Multiplayer/Session/party_book.cpp Server/server_config.cpp Server/steam_server.cpp
-    Server/server_update.cpp $<$<BOOL:${WIN32}>:Launcher/updater.cpp>
+    Server/server_update.cpp Server/server_release.cpp $<$<BOOL:${WIN32}>:Launcher/updater.cpp>
+    Server/global_bans.cpp Extension/Multiplayer/developer_identity.cpp
     Extension/Multiplayer/Steam/steam_transport.cpp Extension/Multiplayer/Net/protocol.cpp
     Extension/Multiplayer/Net/delta_codec.cpp Extension/Multiplayer/Net/wire_codec.cpp
     Extension/Multiplayer/Remote/playback_buffers.cpp Extension/Multiplayer/Session/password.cpp
@@ -127,7 +172,7 @@ add_executable(dingosdk_server Server/main.cpp Server/server_host.cpp Server/ser
 target_include_directories(dingosdk_server SYSTEM PRIVATE "${PROJECT_SOURCE_DIR}/External/steam_networking")
 if(WIN32)
     target_link_libraries(dingosdk_server PRIVATE dingosdk_launcher_support dingosdk_world_layer_scan dingosdk_json
-        dingosdk_lz4 dingosdk_zstd dingosdk_logging dingosdk_miniz dingosdk_word_filter winhttp bcrypt winmm)
+        dingosdk_lz4 dingosdk_zstd dingosdk_logging dingosdk_miniz dingosdk_word_filter dingosdk_https winhttp bcrypt winmm)
     set_target_properties(dingosdk_server PROPERTIES OUTPUT_NAME "ReSkateServer")
     dingosdk_version_info(dingosdk_server "ReSkate dedicated server" "ReSkateServer.exe" VFT_APP)
 else()

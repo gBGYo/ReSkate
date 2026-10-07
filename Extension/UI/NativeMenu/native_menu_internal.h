@@ -35,7 +35,7 @@ constexpr const char* anchored_widget = "UI/Foundations/Templates/Layouts/Anchor
 constexpr const char* horizontal_widget = "UI/Foundations/Templates/Layouts/Partitions/Horizontal/HorizontalPartition_LinearFocus_Widget";
 constexpr const char* vertical_widget = "UI/Foundations/Templates/Layouts/Partitions/Vertical/VerticalPartition_LinearFocus_Widget";
 enum class RowKind { button, input, text };
-struct Action { std::uint64_t generation{}; std::string command, argument; };
+using Action = menu_data::MenuAction;
 struct NativeAction {
     // An unbound native FunctionTypeInfo reference. The native delegate copier
     // borrows untagged references, so descriptors live for the process lifetime.
@@ -57,6 +57,7 @@ struct State {
     std::array<NativeAction, max_actions> actions;
     std::atomic<unsigned> action_count{};
     std::atomic<std::uint64_t> generation{};
+    std::uint64_t pass{};  // render passes so far; see menu_data::action_slot
     Address base{}, manager{};
     Value core, page, list, menu_item;
     OwnedMenuModels<Value> owned_models;

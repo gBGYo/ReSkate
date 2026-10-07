@@ -21,6 +21,7 @@
 #include <map>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -122,6 +123,10 @@ void field(const Fonts& fonts, const char* name, const std::string& value);
 // blue edge when it is ticked. Returns true when the row itself was clicked,
 // which opens the mod's overview; the widgets drawn over it keep their clicks.
 bool list_row(const char* id, float width, float height, bool ticked);
+// An on/off switch, blue while on. Returns true when it was flipped.
+bool toggle(const char* id, bool* on);
+// A square button with three dots, for a row's menu.
+bool more_button(const char* id, float size);
 
 // Draws only the rows a scrolling child actually shows. Unlike ImGuiListClipper
 // this copes with rows of different heights, which one open row needs.
@@ -385,9 +390,16 @@ struct ModsPanel {
     int selected{-1};                    // the mod whose overview is open
     bool overview{};                     // the overview popup is showing
     int tab{};                           // 0 MY MODS, 1 GET MODS
+    // MY MODS: what the list is narrowed to and ordered by, and the mods ticked
+    // to be changed together (folder names).
+    std::array<char, 96> search{};
+    int filter{};
+    int order{};
+    std::set<std::string, std::less<>> marked;
+    std::string anchor;                  // the last mod ticked: where a Shift-click range starts
     std::string message;
     bool message_error{};
-    std::string confirm_remove;          // folder awaiting "Remove" confirmation
+    std::vector<std::string> confirm_remove;   // folders awaiting "Uninstall" confirmation
     fs::path conflict_source;            // install waiting for "Replace" confirmation
     std::string conflict_name;
 

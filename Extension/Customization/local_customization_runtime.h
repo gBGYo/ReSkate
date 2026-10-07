@@ -15,27 +15,15 @@ struct CosmeticRuntime {
     std::uintptr_t item_manager{};
     std::uint32_t item_count{};
     std::map<std::string, CosmeticItemInfo, std::less<>> items;
+    // Presets whose last load was refused. A save to one is refused too, so the
+    // standard skater the game shows in its place is never written over the
+    // outfit on disk.
     std::set<std::string> blocked_loadouts;
-    // Presets whose load was refused only because the cosmetics catalog was not
-    // ready yet, with the record the game asked us to fill. The game asks once
-    // per level load and does not ask again, so the pump retries these once the
-    // catalog is ready. Until one succeeds the preset stays in
-    // `blocked_loadouts`, so a save cannot write over the outfit on disk.
-    //
-    // The loadout manager's array is recorded with it. A record is only written
-    // to when that array is still the same one, bounds and all: inside the
-    // array and on its stride says a record is there, not that it is still
-    // this preset's, and a level load can rebuild the array under us. Writing
-    // one preset's outfit into another's slot would lose a saved character,
-    // which is worse than not applying it at all.
-    struct PendingLoad {
-        void* destination{};
-        std::uintptr_t manager{}, begin{}, end{};
-    };
-    std::map<std::string, PendingLoad, std::less<>> pending_loads;
     // Saved outfit items that were not installed when their preset loaded (a
     // disabled or removed costume mod). The slot shows its default this session;
-    // saves keep the original item unless the player changes that slot.
+    // saves keep the original item unless the player changes that slot. Also
+    // saved slots the template did not have then (a mod that adds slots,
+    // switched off): those have no slot to show in, and saves carry them along.
     struct HeldSlot { std::size_t recipe{}; profile::CosmeticSlot saved; std::string fallback; };
     std::map<std::string, std::vector<HeldSlot>, std::less<>> held_slots;
     std::set<std::string> diagnostics;
@@ -122,11 +110,11 @@ void initialize_starter_from_expression(std::uintptr_t vm, std::uint32_t pc) noe
 bool recover_card_only_preset(std::string_view id, const profile::CosmeticLoadout& saved,
     const profile::CosmeticLoadout& defaults);
 
+// The game calls this with a temporary of its own (a slot's default recipes) and
+// builds the slot from what is left in it: the saved outfit when this returns
+// true, the standard skater when it returns false. It asks once, when the slot
+// is first needed after a level load, and there is no record to fill in later.
 bool load_cosmetic_hook(const void* wrapper, void* destination);
-// Applies the outfits whose load was refused for a catalog that was not ready.
-// Call from the customization pump, holding native_mutex, once
-// refresh_cosmetic_catalog() is true.
-void retry_pending_cosmetic_loads();
 
 void save_cosmetic_hook(std::uintptr_t manager, void* record, const char* raw_id, const char* reason, bool changed_only);
 }

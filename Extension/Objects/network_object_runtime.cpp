@@ -302,6 +302,10 @@ void update_network_object_moves() {
 } // namespace dingosdk::profile_runtime
 
 namespace dingosdk {
+// Everything the other players have placed that is shown here, all of them together. Each
+// owner has a limit of its own; without one for the session, every player a session can hold
+// could add a full layout to the native world.
+constexpr std::size_t max_remote_objects = 16384;
 void set_remote_network_objects(std::string_view map, std::span<const NetworkObjectOwner> owners) {
     using namespace profile_runtime;
     if (owners.size() > multiplayer::max_remote_players)
@@ -318,9 +322,10 @@ void set_remote_network_objects(std::string_view map, std::span<const NetworkObj
         std::size_t total{};
         bool same = s.map == map;
         for (const auto &owner : owners) {
-            total += owner.objects.size();
             for (const auto &object : owner.objects) {
-                if (!same) break;
+                if (total == max_remote_objects) break;
+                ++total;
+                if (!same) continue;
                 const auto found = s.desired.find({owner.owner, owner.epoch, object.id});
                 same = found != s.desired.end() && found->second.id == object.id && found->second.item == object.item &&
                        found->second.position == object.position && found->second.rotation == object.rotation &&
@@ -335,6 +340,9 @@ void set_remote_network_objects(std::string_view map, std::span<const NetworkObj
     std::map<network_objects_detail::Key, profile::PlacedObject> desired;
     for (const auto &owner : owners) {
         for (const auto &object : owner.objects) {
+            // Owners come in a stable order: past the limit, the later ones' objects are left out.
+            if (desired.size() == max_remote_objects)
+                break;
             if (!multiplayer::valid_network_object(object))
                 return;
             if (!desired

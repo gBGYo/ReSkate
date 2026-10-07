@@ -62,6 +62,20 @@ int main(int argc, char** argv) {
     check(stadium != travel.access_points.end() && stadium->second == std::vector<std::string>{"location_stadium"},
         "stadium entrance offers only the first stadium");
     check(travel.access_points.size() == 5, "five access points");
+    check(catalogs.music_playlists.size() == 54, "54 music playlists");
+    if (const auto station = catalogs.music_playlists.find("0_Licensed_All"); station != catalogs.music_playlists.end())
+        check(station->second.name == "San Van Soundtrack" && station->second.tracks.size() == 107 &&
+            station->second.tracks.front() == "2hollis - flash" &&
+            station->second.artwork == "cdn:/0e63e2111f9088448ae261ab0f930a4a", "San Van Soundtrack station");
+    else check(false, "San Van Soundtrack station");
+    if (const auto ballroom = catalogs.music_playlists.find("1920sBallroom"); ballroom != catalogs.music_playlists.end())
+        check(ballroom->second.name == "Ballroom 237" && ballroom->second.tracks.size() == 3, "Ballroom station");
+    else check(false, "Ballroom station");
+    if (const auto art = catalogs.music_song_artwork.find("Freddie Gibbs, The Alchemist, Anderson .Paak - Ensalada");
+        art != catalogs.music_song_artwork.end())
+        check(art->second == "cdn:/ad89945108fd5d7d6fc94ccb33c0f500", "a song's cover art");
+    else check(false, "a song's cover art");
+    check(catalogs.music_song_artwork.size() >= 100, "the licensed songs have cover art");
     if (argc > 2) {
         Json dump{{"items", catalogs.items}, {"challenges", catalogs.challenges}, {"entitlements", Json::array()}};
         for (const auto& id : catalogs.entitlements) dump["entitlements"].push_back(id);

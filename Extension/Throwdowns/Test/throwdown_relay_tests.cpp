@@ -24,6 +24,7 @@ struct Call {
 std::vector<Call> calls;
 std::map<std::string, std::string> settings_changed;
 bool leaderboard_live = true;
+bool types_ready = true; // stands in for the event types of the level being found
 std::uint64_t last_token{};
 }
 
@@ -37,7 +38,7 @@ namespace dingosdk::multiplayer {
 std::uint32_t local_native_player_id() noexcept { return 2; }
 std::uint64_t native_party_player_info(std::uintptr_t, std::size_t) noexcept { return 0; }
 void spectate_party_member(std::uint64_t) noexcept {}
-bool prepare_throwdown_injection() noexcept { calls.push_back({"prepare"}); return true; }
+bool prepare_throwdown_injection() noexcept { calls.push_back({"prepare"}); return types_ready; }
 bool queue_throwdown_spawn(std::uint64_t token, std::uint32_t host, const std::string &series,
                            const std::vector<std::uint8_t> &, const std::vector<std::uint8_t> &) noexcept {
     last_token = token;
@@ -759,6 +760,24 @@ void beacon_flow() {
     check(out.size() == 1 && out[0].kind == Kind::beacon && !out[0].add, "The local beacon's removal was not relayed");
     end_session();
 }
+// A level change takes the event types with it. The relay asks for them again instead of
+// remembering that it once had them, and shows a drop only when they are back.
+void level_change_flow() {
+    using namespace std::chrono_literals;
+    const ThrowdownRelayInput in{me, {{leader, 3}}, true, 77};
+    tick(in);
+    types_ready = false;
+    std::this_thread::sleep_for(300ms); // past the relay's quarter-second re-check
+    calls.clear();
+    receive(leader, offer(leader, 0x4321));
+    tick(in);
+    check(count("prepare") == 1 && !find("spawn"), "A drop was shown while the level's event types were not found");
+    types_ready = true;
+    std::this_thread::sleep_for(300ms);
+    tick(in);
+    check(count("spawn") == 1, "The drop was not shown once the event types were found again");
+    end_session();
+}
 } // namespace
 
 int main() {
@@ -771,7 +790,8 @@ int main() {
         alone_flow();
         challenge_flow();
         beacon_flow();
-        std::cout << "Throwdown relay: guest, leader, removal, Spot Battle, S.K.A.T.E., last-player, coop challenge and party beacon flows passed.\n";
+        level_change_flow();
+        std::cout << "Throwdown relay: guest, leader, removal, Spot Battle, S.K.A.T.E., last-player, coop challenge, party beacon and level change flows passed.\n";
         return 0;
     } catch (const std::exception &e) {
         std::cerr << e.what() << '\n';

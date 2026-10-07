@@ -9,6 +9,9 @@ namespace dingosdk::multiplayer {
 inline constexpr std::uint32_t skater_recipe_key = 2759515148U, board_recipe_key = 1583459055U;
 inline constexpr std::size_t max_cosmetic_slots = 64, max_cosmetic_scalars = 64,
                              max_cosmetic_parameters = 128, max_cosmetic_asset = 255;
+// The largest encoded outfit packet. Well under the packet limit, so an outfit a host accepts
+// always fits again with the reference marker a relayed copy carries.
+inline constexpr std::size_t max_appearance_bytes = 16384;
 struct CosmeticSlot {
     std::uint32_t slot{};
     std::string asset;
@@ -25,9 +28,37 @@ struct PlayerCard {
     std::uint32_t background{}, emblem{}, title{};
     bool operator==(const PlayerCard &) const = default;
 };
+// How one of a listed player's marked cosmetics is coloured (developer_identity.h), chosen on
+// the menu's Special page and carried in their Appearance, so everyone sees the same.
+enum class MarkMode : std::uint8_t { standard, off, gradient, solid };
+struct MarkStyle {
+    MarkMode mode{};                          // standard: what the player's list gives
+    std::array<std::uint8_t, 3> from{}, to{}; // as picked on screen. gradient: between the two; solid: `from`
+    std::uint8_t speed{};                     // 0 normal, 1 slow, 2 fast
+    bool operator==(const MarkStyle &) const = default;
+};
+// The marked cosmetics, in this order: whatever the skater has in each of these slots, then the
+// parts of whatever board they ride.
+inline constexpr std::array<std::string_view, 12> mark_item_names{
+    "Top", "Bottoms", "Shoes", "Socks", "Hat", "Glasses", "Outfit", "Costume", "Deck", "Grip tape", "Trucks", "Wheels"};
+inline constexpr std::size_t mark_items = mark_item_names.size(), skater_mark_items = 8;
+using MarkStyles = std::array<MarkStyle, mark_items>;
+// The rainbow, as a style a developer or a member of staff picks (a developer's standard is
+// the rainbow already). Players on builds from before it could be picked must be able to read
+// the style, so it travels as one they know: a solid colour, with this in the second colour a
+// solid does not use. They show the solid colour; nobody else's item takes the rainbow from it.
+inline constexpr std::array<std::uint8_t, 3> rainbow_marker{0x52, 0x42, 0x57}; // "RBW"
+inline bool rainbow_style(const MarkStyle &style) noexcept { return style.mode == MarkMode::solid && style.to == rainbow_marker; }
+inline bool valid_mark_style(const MarkStyle &style) noexcept {
+    return style.mode <= MarkMode::solid && style.speed <= 2;
+}
 struct Appearance {
     CosmeticRecipe skater, board;
     PlayerCard card;
+    // The player has turned off what the ReSkate backend gives them (developer_identity.h):
+    // nobody shows their tag, or nobody animates their hoodie and board.
+    bool hide_tag{}, hide_items{};
+    MarkStyles marks{};
     bool operator==(const Appearance &) const = default;
 };
 // Stand-ins for a peer's cosmetic that this PC does not have (a player's

@@ -1,8 +1,10 @@
 #include "server_config.h"
 #include "Engine/Core/Json/json.h"
+#include "Engine/Core/Platform/path_text.h"
 #include "Extension/Multiplayer/Net/protocol.h"
 #include "Engine/Game/World/world_names.h"
 #include <algorithm>
+#include <cctype>
 #include <fstream>
 #include <sstream>
 #include <stdexcept>
@@ -16,11 +18,17 @@ Json to_json(const ServerConfig &c) {
     auto root = Json::object();
     root["name"] = c.name;
     root["map"] = c.map;
+    auto pool = Json::array();
+    for (const auto &map : c.map_pool) pool.push_back(map);
+    root["map_pool"] = std::move(pool);
+    root["map_rotation_minutes"] = c.map_rotation;
     root["max_players"] = c.max_players;
     root["password"] = c.password;
     root["welcome"] = c.welcome;
     root["listed"] = c.listed;
+    root["steam_token"] = c.steam_token;
     root["auto_update"] = c.auto_update;
+    root["global_bans"] = c.global_bans;
     root["activity_log"] = c.activity_log;
     root["announce_throwdowns"] = c.announce_throwdowns;
     root["parties"] = c.parties;
@@ -42,6 +50,7 @@ Json to_json(const ServerConfig &c) {
     distances["low_rate_start"] = c.distances.low_rate_start;
     root["distances"] = std::move(distances);
     root["object_placement"] = placement_text(c.object_placement);
+    root["object_limit"] = c.object_limit;
     root["noclip"] = c.noclip;
     root["no_bail"] = c.no_bail;
     root["boosts"] = c.boosts;
@@ -110,11 +119,17 @@ ServerConfig load_config(const std::filesystem::path &file, std::vector<std::str
     if (!root.is_object()) throw std::runtime_error("The server config must be a JSON object.");
     c.name = root.value("name", c.name);
     c.map = root.value("map", c.map);
+    if (root.contains("map_pool") && root.at("map_pool").is_array())
+        for (const auto &map : root.at("map_pool"))
+            if (map.is_string() && !map.string().empty()) c.map_pool.push_back(map.string());
+    c.map_rotation = std::min(root.value("map_rotation_minutes", c.map_rotation), max_map_rotation);
     c.max_players = root.value("max_players", c.max_players);
     c.password = root.value("password", c.password);
     c.welcome = root.value("welcome", c.welcome);
     c.listed = root.value("listed", c.listed);
+    c.steam_token = root.value("steam_token", c.steam_token);
     c.auto_update = root.value("auto_update", c.auto_update);
+    c.global_bans = root.value("global_bans", c.global_bans);
     c.activity_log = root.value("activity_log", c.activity_log);
     c.announce_throwdowns = root.value("announce_throwdowns", c.announce_throwdowns);
     c.parties = root.value("parties", c.parties);
@@ -128,8 +143,15 @@ ServerConfig load_config(const std::filesystem::path &file, std::vector<std::str
             if (value.is_string())
                 if (const auto fingerprint = parse_scoring(value.string()))
                     c.score_allow.push_back(*fingerprint);
-    c.port = static_cast<std::uint16_t>(root.value("port", static_cast<unsigned>(c.port)));
-    c.query_port = static_cast<std::uint16_t>(root.value("query_port", static_cast<unsigned>(c.query_port)));
+    // Checked here, not in config_error: once narrowed, 70000 is just port 4464, and the
+    // next save would write that over the owner's typo.
+    const auto read_port = [&](const char *key, std::uint16_t fallback) {
+        const auto value = root.value(key, static_cast<unsigned>(fallback));
+        if (value < 1 || value > 65535) throw std::runtime_error(std::string(key) + " must be 1 to 65535.");
+        return static_cast<std::uint16_t>(value);
+    };
+    c.port = read_port("port", c.port);
+    c.query_port = read_port("query_port", c.query_port);
     c.tps = root.value("tps", c.tps);
     c.voice_chat = root.value("voice_chat", c.voice_chat);
     c.voice_range = root.value("voice_range", c.voice_range);
@@ -158,6 +180,7 @@ ServerConfig load_config(const std::filesystem::path &file, std::vector<std::str
         c.votes.seconds = std::clamp(votes.value("seconds", c.votes.seconds), 10U, 300U);
         c.votes.cooldown = std::clamp(votes.value("cooldown_seconds", c.votes.cooldown), 0U, 3600U);
     }
+    c.object_limit = root.value("object_limit", c.object_limit);
     const auto placement = root.value("object_placement", placement_text(c.object_placement));
     // On a dedicated server the protocol's "host only" means its admins.
     c.object_placement = placement == "nobody" ? ObjectPlacement::nobody
@@ -190,7 +213,7 @@ void save_config(const ServerConfig &c) {
     {
         std::ofstream out(temporary, std::ios::binary | std::ios::trunc);
         out << to_json(c).dump(2) << '\n';
-        if (!out) throw std::runtime_error("Cannot write " + temporary.string());
+        if (!out) throw std::runtime_error("Cannot write " + path_utf8(temporary));
     }
     std::filesystem::rename(temporary, c.file);
 }
@@ -213,16 +236,23 @@ std::optional<std::uint64_t> parse_scoring(std::string_view text) {
 }
 std::string config_error(const ServerConfig &c) {
     using namespace multiplayer;
-    if (c.name.empty() || c.name.size() > 64 || !valid_member_name(c.name)) return "name must be 1 to 64 characters.";
+    if (!valid_server_name(c.name)) return std::string("name must be ") + server_name_rule + ".";
+    if (c.steam_token.size() > 64 || !std::all_of(c.steam_token.begin(), c.steam_token.end(), [](unsigned char ch) { return std::isalnum(ch); }))
+        return "steam_token must be a game server login token (letters and digits), or empty to sign in anonymously.";
     if (c.map.empty() || !valid_map_destination(map_destination(c.map)))
         return "map \"" + c.map + "\" is not a known map. Use a name like \"San Vansterdam\", or put the map's mod "
                "folder in Mods next to the server.";
+    for (const auto &map : c.map_pool)
+        if (!find_level(map) || !valid_map_destination(map_destination(map)))
+            return "map_pool: \"" + map + "\" is not a single known map. Use names like \"Isle of Grom\", or put the "
+                   "map's mod folder in Mods next to the server.";
     if (c.max_players < 1 || c.max_players + 1 > max_players)
         return "max_players must be 1 to " + std::to_string(max_players - 1) + ".";
     if (c.password.size() > 64) return "password must be at most 64 characters.";
     if (!c.welcome.empty() && !valid_chat_text(c.welcome)) return "welcome must be one chat line (at most 200 bytes).";
     if (!valid_multiplayer_tps(c.tps)) return "tps must be 20, 30, 60 or 120.";
     if (!valid_voice_range(c.voice_range)) return "voice_range must be 50 to 1000.";
+    if (!valid_object_limit(c.object_limit)) return "object_limit must be 0 (no limit) to " + std::to_string(max_object_limit) + ".";
     if (!c.distances.valid()) return "distances must be ordered: full_rate_return < half_rate_start <= half_rate_return < low_rate_start <= 10000.";
     for (unsigned lot = 0; lot < park_lots.size(); ++lot)
         if (c.parks[lot].empty() || !valid_park(lot, c.parks[lot]))
@@ -323,5 +353,33 @@ std::string map_setting(std::string_view map) {
 std::string map_label(std::string_view map) {
     if (const auto *level = find_level(map)) return level->name;
     return world_level_name(world_destination_asset(map_destination(map)));
+}
+std::vector<const ServerLevel *> pool_levels(const ServerConfig &config) {
+    std::vector<const ServerLevel *> pool;
+    const auto add = [&](const ServerLevel *level) {
+        if (level && multiplayer::valid_map_destination(map_destination(level->asset)) &&
+            std::find(pool.begin(), pool.end(), level) == pool.end())
+            pool.push_back(level);
+    };
+    if (config.map_pool.empty())
+        for (const auto &level : level_list()) add(&level);
+    for (const auto &map : config.map_pool) add(find_level(map));
+    return pool;
+}
+bool in_map_pool(const ServerConfig &config, std::string_view map) {
+    if (config.map_pool.empty()) return true;
+    const auto pool = pool_levels(config);
+    const auto *level = find_level(map);
+    return level && std::find(pool.begin(), pool.end(), level) != pool.end();
+}
+const ServerLevel *next_pool_map(const ServerConfig &config, std::string_view map) {
+    const auto pool = pool_levels(config);
+    const auto *current = find_level(map);
+    const auto at = static_cast<std::size_t>(std::find(pool.begin(), pool.end(), current) - pool.begin());
+    for (std::size_t step = 1; step <= pool.size(); ++step) {
+        const auto *next = at == pool.size() ? pool[step - 1] : pool[(at + step) % pool.size()];
+        if (next != current) return next;
+    }
+    return nullptr;
 }
 } // namespace dingosdk::server

@@ -12,7 +12,7 @@
 // The game's own party buttons (Social menu, player cards, invites) end in a handful of request
 // natives that need a native Blaze game group, which ReSkate never has. While the SDK owns the
 // party, these hooks turn each request into a ReSkate party request (the session's "party"
-// command, which a dedicated server answers) and complete the button's callback themselves.
+// command, which whoever hosts answers) and complete the button's callback themselves.
 // Party queries are answered from the published roster (analysis/party-re/native-core.md).
 namespace dingosdk::multiplayer {
 using namespace native_party_detail;
@@ -40,7 +40,7 @@ struct Requests {
 };
 Requests &requests() { static auto *value = new Requests; return *value; }
 std::atomic<bool> changes_allowed{};
-constexpr const char *lobby_party = "Everyone in a lobby is in one party with the host.";
+constexpr const char *lobby_party = "Parties need a multiplayer session.";
 std::uint64_t now_ms() {
     return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now().time_since_epoch()).count());
@@ -333,7 +333,7 @@ bool post_event(std::uintptr_t type, const void *payload) {
 }
 void post_party_changes(const Published *previous, const Published &next) {
     if (!requests().installed.load(std::memory_order_acquire)) return;
-    // The local party as the game shows it (a hidden lobby party is none).
+    // The local party as the game shows it.
     const auto members = [](const Published *p) {
         std::map<std::uint64_t, bool> result; // id -> leads
         if (!p) return result;

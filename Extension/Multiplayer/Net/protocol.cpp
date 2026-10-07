@@ -9,6 +9,7 @@ namespace dingosdk::multiplayer {
 namespace {
 constexpr std::uint32_t magic = 0x31504d52; // RMP1, little endian
 constexpr std::size_t header_size = packet_header_size;
+std::size_t utf8_length(std::string_view text, std::size_t at) noexcept; // defined with the text checks below
 std::uint8_t encode_park(unsigned lot, std::string_view choice) {
     if (choice.empty() || choice == "empty") return 0;
     for (unsigned family = 0; family < park_families.size(); ++family)
@@ -180,9 +181,14 @@ bool valid_roster(std::span<const Member> members, unsigned capacity) noexcept {
         // A server is in no party; only a party's leader leads or opens it.
         if ((server && m.party) || (!m.party && (m.party_leader || m.party_open)) || (m.party_open && !m.party_leader))
             return false;
-        for (unsigned char c : m.name)
-            if (c < 32 || c == 127)
+        // Names reach the game's own UI: whole UTF-8 characters only, and no controls.
+        for (std::size_t at = 0; at < m.name.size();) {
+            const auto length = utf8_length(m.name, at);
+            const auto c = static_cast<unsigned char>(m.name[at]);
+            if (!length || c < 32 || c == 127)
                 return false;
+            at += length;
+        }
         unsigned leaders = m.party_leader ? 1U : 0U, size = 1;
         for (std::size_t j = 0; j < members.size(); ++j) {
             if (j < i && members[j].id == m.id)
@@ -231,7 +237,7 @@ bool valid_appearance(const Appearance &a) noexcept {
     if (a.skater.key != skater_recipe_key || a.skater.version != 2 || a.board.key != board_recipe_key ||
         a.board.version != 1)
         return false;
-    std::size_t size = header_size + 12;
+    std::size_t size = header_size + 13 + mark_items * 8;
     for (const auto *r : {&a.skater, &a.board}) {
         if (r->scalars.size() > max_cosmetic_scalars || r->items.empty() ||
             r->items.size() > max_cosmetic_slots)
@@ -251,7 +257,7 @@ bool valid_appearance(const Appearance &a) noexcept {
             size += 8 + item.asset.size() + item.parameters.size() * 4;
         }
     }
-    return size <= max_packet;
+    return size <= max_appearance_bytes;
 }
 bool valid_transform(const Transform &t) noexcept {
     for (float v : t.position)
@@ -334,6 +340,8 @@ std::vector<std::uint8_t> encode(const Packet &p, bool compact_pose, std::uint32
         throw std::invalid_argument("Invalid throwdown message");
     if (p.kind == PacketKind::physics_tuning && (!p.source || p.tuning.size() > max_physics_tuning))
         throw std::invalid_argument("Invalid physics tuning");
+    if (p.kind == PacketKind::physics_extras && (!p.source || p.extras.size() > max_physics_extras))
+        throw std::invalid_argument("Invalid physics extras");
     if (p.kind == PacketKind::party && (!p.source || !valid_party_request(p.party_action, p.party_player)))
         throw std::invalid_argument("Invalid party message");
     if (p.kind == PacketKind::scoring && (!p.source || (!p.text.empty() && !valid_admin_text(p.text))))
@@ -348,7 +356,8 @@ std::vector<std::uint8_t> encode(const Packet &p, bool compact_pose, std::uint32
          })))
         throw std::invalid_argument("Invalid ban list");
     if (p.kind == PacketKind::maps &&
-        (!p.source || p.maps.size() > max_server_maps ||
+        (!p.source || p.maps.size() > max_server_maps || !valid_map_pool(p.map_pool, p.maps.size()) ||
+         p.map_rotation > max_map_rotation ||
          std::any_of(p.maps.begin(), p.maps.end(), [](const auto &asset) { return !valid_map_asset(asset); })))
         throw std::invalid_argument("Invalid server map list");
     if (p.kind == PacketKind::hello && !p.text.empty() && !valid_member_name(p.text))
@@ -358,6 +367,8 @@ std::vector<std::uint8_t> encode(const Packet &p, bool compact_pose, std::uint32
     if (p.kind == PacketKind::map_offer &&
         (!valid_map_destination(p.destination) || p.map != map_hash(p.destination)))
         throw std::invalid_argument("Invalid host map destination");
+    if ((p.kind == PacketKind::map_offer || p.kind == PacketKind::world_state) && !valid_map_label(p.map_label))
+        throw std::invalid_argument("Invalid map name");
     if (p.kind == PacketKind::world_state &&
         (p.destination.empty() ? (p.map != 0 || p.world_ready)
                                : (!valid_map_destination(p.destination) || p.map != map_hash(p.destination))))
@@ -373,7 +384,7 @@ std::vector<std::uint8_t> encode(const Packet &p, bool compact_pose, std::uint32
         p.kind != PacketKind::objects && p.kind != PacketKind::voice && p.kind != PacketKind::chat &&
         p.kind != PacketKind::admin && p.kind != PacketKind::bans && p.kind != PacketKind::maps &&
         p.kind != PacketKind::throwdown && p.kind != PacketKind::teleport && p.kind != PacketKind::physics_tuning &&
-        p.kind != PacketKind::party && p.kind != PacketKind::scoring)
+        p.kind != PacketKind::party && p.kind != PacketKind::scoring && p.kind != PacketKind::physics_extras)
         throw std::invalid_argument("Unknown packet kind");
     const auto payload = greeting ? 72
                          : p.kind == PacketKind::away
@@ -400,6 +411,8 @@ std::vector<std::uint8_t> encode(const Packet &p, bool compact_pose, std::uint32
             w.integer(p.map_authorized ? 1 : 0, 1);
             w.integer(p.destination.size(), 2);
             w.bytes.insert(w.bytes.end(), p.destination.begin(), p.destination.end());
+            w.integer(p.map_label.size(), 1);
+            w.bytes.insert(w.bytes.end(), p.map_label.begin(), p.map_label.end());
         }
         if (p.kind == PacketKind::hello) {
             w.integer(p.text.size(), 1);
@@ -410,6 +423,8 @@ std::vector<std::uint8_t> encode(const Packet &p, bool compact_pose, std::uint32
         w.integer(p.world_ready ? 1 : 0, 1);
         w.integer(p.destination.size(), 2);
         w.bytes.insert(w.bytes.end(), p.destination.begin(), p.destination.end());
+        w.integer(p.map_label.size(), 1);
+        w.bytes.insert(w.bytes.end(), p.map_label.begin(), p.map_label.end());
     } else if (p.kind == PacketKind::world_ready) {
         w.integer(p.world_ready ? 1 : 0, 1);
     } else if (p.kind == PacketKind::pose) {
@@ -437,6 +452,13 @@ std::vector<std::uint8_t> encode(const Packet &p, bool compact_pose, std::uint32
         w.integer(p.appearance.card.background, 4);
         w.integer(p.appearance.card.emblem, 4);
         w.integer(p.appearance.card.title, 4);
+        w.integer((p.appearance.hide_tag ? 1 : 0) | (p.appearance.hide_items ? 2 : 0), 1);
+        for (const auto &style : p.appearance.marks) {
+            w.integer(static_cast<std::uint8_t>(style.mode), 1);
+            for (const auto part : style.from) w.integer(part, 1);
+            for (const auto part : style.to) w.integer(part, 1);
+            w.integer(style.speed, 1);
+        }
     } else if (p.kind == PacketKind::audio) {
         w.integer(p.audio.size(), 2);
         AudioState previous;
@@ -485,6 +507,10 @@ std::vector<std::uint8_t> encode(const Packet &p, bool compact_pose, std::uint32
         w.integer(p.tuning.size(), 2);
         w.bytes.insert(w.bytes.end(), p.tuning.begin(), p.tuning.end());
     }
+    if (p.kind == PacketKind::physics_extras) {
+        w.integer(p.extras.size(), 2);
+        w.bytes.insert(w.bytes.end(), p.extras.begin(), p.extras.end());
+    }
     if (p.kind == PacketKind::scoring) {
         w.integer(p.scoring, 8);
         w.integer(p.text.size(), 2);
@@ -496,6 +522,9 @@ std::vector<std::uint8_t> encode(const Packet &p, bool compact_pose, std::uint32
             w.integer(asset.size(), 1);
             w.bytes.insert(w.bytes.end(), asset.begin(), asset.end());
         }
+        w.integer(p.map_pool.size(), 2);
+        for (const auto index : p.map_pool) w.integer(index, 2);
+        w.integer(p.map_rotation, 2);
     }
     if (p.kind == PacketKind::bans) {
         w.integer(p.ban_total, 4);
@@ -529,6 +558,8 @@ std::vector<std::uint8_t> encode(const Packet &p, bool compact_pose, std::uint32
         if (!valid_multiplayer_tps(p.tps)) throw std::invalid_argument("Invalid session TPS");
         w.integer(p.tps, 1);
         w.integer(static_cast<std::uint8_t>(p.object_placement), 1);
+        if (!valid_object_limit(p.object_limit)) throw std::invalid_argument("Invalid object limit");
+        w.integer(p.object_limit, 2);
         w.integer(p.force_world_layers, 1);
         // One mode per world-layer catalog row; both peers read the same catalog
         // from the same game build.
@@ -573,6 +604,13 @@ std::vector<std::uint8_t> encode(const Packet &p, bool compact_pose, std::uint32
         w.bytes[8 + i] = static_cast<std::uint8_t>(actual_payload >> (8 * i));
     return std::move(w.bytes);
 }
+static bool read_map_label(Reader &r, std::span<const std::uint8_t> bytes, Packet &p) {
+    const auto length = r.integer(1);
+    if (length > max_member_name || length > bytes.size() - r.at) return false;
+    p.map_label.assign(reinterpret_cast<const char *>(bytes.data() + r.at), static_cast<std::size_t>(length));
+    r.at += static_cast<std::size_t>(length);
+    return valid_map_label(p.map_label);
+}
 std::optional<Packet> decode(std::span<const std::uint8_t> bytes) noexcept {
     try {
         if (bytes.size() < header_size || bytes.size() > max_packet)
@@ -611,7 +649,7 @@ std::optional<Packet> decode(std::span<const std::uint8_t> bytes) noexcept {
                 p.destination.assign(reinterpret_cast<const char *>(bytes.data() + r.at),
                                      static_cast<std::size_t>(length));
                 r.at += static_cast<std::size_t>(length);
-                if (!valid_map_destination(p.destination) || p.map != map_hash(p.destination))
+                if (!valid_map_destination(p.destination) || p.map != map_hash(p.destination) || !read_map_label(r, bytes, p))
                     return {};
             }
             if (p.kind == PacketKind::hello) {
@@ -636,6 +674,7 @@ std::optional<Packet> decode(std::span<const std::uint8_t> bytes) noexcept {
                 if (p.destination.empty() ? (p.map != 0 || p.world_ready)
                                           : (!valid_map_destination(p.destination) || p.map != map_hash(p.destination)))
                     return {};
+                if (!read_map_label(r, bytes, p)) return {};
             }
         } else if (p.kind == PacketKind::pose) {
             const auto skater = r.integer(2), board = r.integer(2);
@@ -662,7 +701,18 @@ std::optional<Packet> decode(std::span<const std::uint8_t> bytes) noexcept {
             p.appearance.card.background = static_cast<std::uint32_t>(r.integer(4));
             p.appearance.card.emblem = static_cast<std::uint32_t>(r.integer(4));
             p.appearance.card.title = static_cast<std::uint32_t>(r.integer(4));
-            if (!p.map || !valid_appearance(p.appearance))
+            const auto flags = r.integer(1);
+            p.appearance.hide_tag = (flags & 1) != 0;
+            p.appearance.hide_items = (flags & 2) != 0;
+            bool styled = true;
+            for (auto &style : p.appearance.marks) {
+                style.mode = static_cast<MarkMode>(r.integer(1));
+                for (auto &part : style.from) part = static_cast<std::uint8_t>(r.integer(1));
+                for (auto &part : style.to) part = static_cast<std::uint8_t>(r.integer(1));
+                style.speed = static_cast<std::uint8_t>(r.integer(1));
+                styled = styled && valid_mark_style(style);
+            }
+            if (flags > 3 || !styled || !p.map || !valid_appearance(p.appearance))
                 return {};
         } else if (p.kind == PacketKind::audio) {
             const auto count = r.integer(2);
@@ -717,6 +767,12 @@ std::optional<Packet> decode(std::span<const std::uint8_t> bytes) noexcept {
                 return {};
             p.tuning.assign(bytes.begin() + static_cast<std::ptrdiff_t>(r.at), bytes.end());
             r.at = bytes.size();
+        } else if (p.kind == PacketKind::physics_extras) {
+            const auto length = r.integer(2);
+            if (!p.source || length > max_physics_extras || length != bytes.size() - r.at)
+                return {};
+            p.extras.assign(bytes.begin() + static_cast<std::ptrdiff_t>(r.at), bytes.end());
+            r.at = bytes.size();
         } else if (p.kind == PacketKind::scoring) {
             p.scoring = r.integer(8);
             const auto length = r.integer(2);
@@ -753,6 +809,11 @@ std::optional<Packet> decode(std::span<const std::uint8_t> bytes) noexcept {
                 if (!valid_map_asset(asset)) return {};
                 p.maps.push_back(std::move(asset));
             }
+            const auto pooled = r.integer(2);
+            if (pooled > p.maps.size()) return {};
+            for (std::uint64_t i = 0; i < pooled; ++i) p.map_pool.push_back(static_cast<std::uint16_t>(r.integer(2)));
+            p.map_rotation = static_cast<std::uint16_t>(r.integer(2));
+            if (!valid_map_pool(p.map_pool, p.maps.size()) || p.map_rotation > max_map_rotation) return {};
         } else if (p.kind == PacketKind::bans) {
             p.ban_total = static_cast<std::uint32_t>(r.integer(4));
             const auto count = r.integer(2);
@@ -805,6 +866,9 @@ std::optional<Packet> decode(std::span<const std::uint8_t> bytes) noexcept {
             const auto placement = r.integer(1);
             if (!valid_object_placement(placement)) return {};
             p.object_placement = static_cast<ObjectPlacement>(placement);
+            const auto object_limit = r.integer(2);
+            if (!valid_object_limit(object_limit)) return {};
+            p.object_limit = static_cast<unsigned>(object_limit);
             const auto forced = r.integer(1);
             if (forced > 1) return {};
             p.force_world_layers = forced != 0;
@@ -922,6 +986,15 @@ bool valid_map_asset(std::string_view asset) noexcept {
     return !asset.empty() && asset.size() <= max_map_asset &&
            std::all_of(asset.begin(), asset.end(), [](char c) { return c > 32 && c < 127 && c != '|'; });
 }
+bool valid_map_label(std::string_view label) noexcept {
+    return label.empty() || (label.size() <= max_member_name && valid_member_name(label));
+}
+bool valid_map_pool(std::span<const std::uint16_t> pool, std::size_t maps) noexcept {
+    if (pool.size() > maps) return false;
+    for (std::size_t i = 0; i < pool.size(); ++i)
+        if (pool[i] >= maps || std::find(pool.begin(), pool.begin() + i, pool[i]) != pool.begin() + i) return false;
+    return true;
+}
 bool valid_admin_text(std::string_view text) noexcept {
     if (text.empty() || text.size() > max_admin_text) return false;
     for (std::size_t at = 0; at < text.size();) {
@@ -949,6 +1022,15 @@ std::string clean_chat_text(std::string_view text) {
     const auto first = result.find_first_not_of(' ');
     if (first == std::string::npos) return {};
     return result.substr(first, result.find_last_not_of(' ') - first + 1);
+}
+std::string clean_roster_name(std::string_view text) {
+    auto name = clean_chat_text(text);
+    if (name.size() > 128) {
+        std::size_t cut = 128;
+        while (cut && (static_cast<unsigned char>(name[cut]) & 0xC0) == 0x80) --cut;
+        name.resize(cut);
+    }
+    return name;
 }
 bool newer_sequence(std::uint32_t a, std::uint32_t b) noexcept {
     const auto d = a - b;

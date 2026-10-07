@@ -4,9 +4,9 @@
 #include <vector>
 
 namespace dingosdk::multiplayer {
-// Parties on a dedicated server (a listen host puts everyone in one party instead). The
-// server owns this book: players ask it to invite, accept, leave and so on (Packet::party),
-// and every roster carries each player's party (Member::party / party_leader / party_open).
+// Parties in a session. Whoever hosts owns this book (a dedicated server, or a lobby's host):
+// players ask it to invite, accept, leave and so on (Packet::party), and every roster carries
+// each player's party (Member::party / party_leader / party_open).
 // Party numbers are the book's own, never 0 (0 = not in a party). A party always has at
 // least two members: one left alone is dissolved.
 class PartyBook {

@@ -206,6 +206,35 @@ int main() {
     mods::save_mod_order(mods, broken.entries);
     check(mods::scan_mods(game).issue.empty(), "Saving repairs a malformed mods.json");
 
+    // A big collection, with the longest names, can be switched off and reordered, and the
+    // list reads back. (There was a limit of 64 mods once: past it nothing could be saved, so
+    // no mod could be disabled.)
+    {
+        constexpr std::size_t collection = 300;
+        const auto big_game = root / L"big";
+        const auto big = launcher_mods::mods_root(big_game);
+        for (std::size_t i = 0; i < collection; ++i) {
+            auto name = std::to_string(i);
+            name = std::string(4 - name.size(), '0') + name + "-";
+            name.resize(mods::maximum_mod_name, 'x');
+            write(big / name / L"layout.toc", "toc");
+        }
+        auto many = mods::scan_mods(big_game);
+        check(many.issue.empty() && many.entries.size() == collection, "A big Mods folder is listed");
+        for (std::size_t i = 0; i < many.entries.size(); i += 3) many.entries[i].enabled = false;
+        std::swap(many.entries.front(), many.entries.back());
+        std::string refusal;
+        try { mods::save_mod_order(big, many.entries); } catch (const std::exception& failure) { refusal = failure.what(); }
+        if (!refusal.empty()) std::cerr << "save refused: " << refusal << '\n';
+        check(refusal.empty(), "A big mod list can be saved");
+        const auto again = mods::scan_mods(big_game);
+        check(again.issue.empty() && again.entries.size() == many.entries.size(), "A big mods.json reads back");
+        bool same = again.entries.size() == many.entries.size();
+        for (std::size_t i = 0; same && i < again.entries.size(); ++i)
+            same = again.entries[i].mod.name == many.entries[i].mod.name && again.entries[i].enabled == many.entries[i].enabled;
+        check(same, "Every mod keeps its place and whether it loads");
+    }
+
     // Thunderstore packages: manifest.json, icon.png and README.md at the top of the zip.
     {
         const auto store_game = root / L"store";

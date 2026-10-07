@@ -97,6 +97,9 @@ struct Remote {
     std::atomic<std::uint64_t> native_evaluated{}, native_skipped{}, native_evaluation_us{}, apply_us{};
     ULONGLONG next_native_animation{}, next_safety_audit{}, next_entity_audit{},
         next_board_safety_audit{}, next_board_status{}, next_status{};
+    // A skateboard that went away is not created again before this: one creation is a heavy
+    // native pass, and a player's board may come and go with every pose.
+    ULONGLONG next_board_create{};
     bool board_failed{};
     std::string board_issue;
     std::string board_status;

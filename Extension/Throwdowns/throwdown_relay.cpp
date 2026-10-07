@@ -43,6 +43,10 @@ bool turn_based(std::string_view series) { return series == spot_battle_mode || 
 // long belongs to a turn this machine never gives them.
 constexpr std::uint64_t attempt_wait_ms = 20000;
 constexpr std::uint64_t offer_interval_ms = 10000, score_interval_ms = 250, gone_forget_ms = 60000;
+// A copy whose spawn is never answered is given up after this long, so the next can be tried;
+// its leader's following offers wait spawn_refused_ms. A leader's repeated coop challenge starts
+// are declined once per decline_interval_ms.
+constexpr std::uint64_t spawning_wait_ms = 30000, spawn_refused_ms = 30000, decline_interval_ms = 5000;
 // While other players are in the session nobody's queue may start on its own timer:
 // the leader starts it (force start) and every joined copy follows.
 constexpr std::string_view queue_timer_setting = "DingoThrowdowns.QueueStartTimer";
@@ -103,7 +107,7 @@ struct Mirror {
     std::string series;
     std::vector<std::uint8_t> placement, settings;
     std::vector<std::uint64_t> members, added; // remote players in it (never the leader or us)
-    std::uint64_t token{}, gone_at{};
+    std::uint64_t token{}, gone_at{}, spawning_since{};
     std::uint32_t mmid{}, max_players{};
     bool joined{}; // the local player is in it
     std::optional<std::vector<std::uint64_t>> start; // the leader started before the copy existed
@@ -198,6 +202,10 @@ struct Relay {
     std::uint32_t beacon_revision{};
     std::uint64_t beacon_sent_at{};
     std::map<std::uint64_t, Beacon> beacons;
+    // Leaders whose last drop could not be spawned here: their new offers wait until then (ms).
+    std::map<std::uint64_t, std::uint64_t> spawn_refused;
+    // When a coop challenge from each leader was last declined: one answer per leader at a time.
+    std::map<std::uint64_t, std::uint64_t> declined;
     bool party_settings{};
     std::uint64_t next_party_settings{};
 };
@@ -333,7 +341,8 @@ void start_mirror(Relay &r, const Key &key, Mirror &m, const std::vector<std::ui
 // Another player joined `m`. A copy the local player has not joined disappears once
 // full, as the leader's own does.
 void mirror_member(Relay &r, Mirror &m, std::uint64_t player, std::uint64_t now) {
-    if (player == r.local || contains(m.members, player)) return;
+    // No queue holds more players than one offer can list.
+    if (player == r.local || contains(m.members, player) || m.members.size() >= max_throwdown_order) return;
     m.members.push_back(player);
     if (!m.joined && m.max_players && 1 + m.members.size() >= m.max_players) {
         destroy_mirror(r, m, now);
@@ -421,6 +430,13 @@ void set_running(Relay &r, const Key &key, const std::string &series) {
     r.early.clear();
     r.early_remote.clear();
 }
+// The running throwdown's participants are known: only they have rows, turns and totals in it.
+// What arrived early from anyone else is dropped.
+void set_players(Relay &r, const std::vector<std::uint64_t> &players) {
+    r.players = players;
+    std::erase_if(r.scores, [&](const auto &entry) { return !contains(r.players, entry.first); });
+    std::erase_if(r.remote, [&](const Remote &entry) { return !contains(r.players, entry.player); });
+}
 
 // ---------------------------------------------------------------------------
 void on_challenge_local(Relay &r, const ThrowdownLocalAction &a, std::uint64_t now);
@@ -500,7 +516,7 @@ void on_local(Relay &r, ThrowdownLocalAction &a, std::uint64_t now) {
             m.state = Mirror::State::started;
             m.start.reset();
             set_running(r, key, m.series);
-            r.players = players;
+            set_players(r, players);
             note("your copy of a linked {} started with {} player(s).", m.series, players.size());
             return;
         }
@@ -510,7 +526,7 @@ void on_local(Relay &r, ThrowdownLocalAction &a, std::uint64_t now) {
             r.hosted->started = true;
             if (r.hosted->relayed) {
                 set_running(r, {r.local, r.hosted->id}, r.hosted->series);
-                r.players = players;
+                set_players(r, players);
             }
         }
         break;
@@ -622,6 +638,8 @@ void on_message(Relay &r, std::uint64_t sender, const ThrowdownMessage &m, std::
             for (const auto player : m.order) mirror_member(r, mirror->second, player, now);
             return;
         }
+        // A leader whose last drop could not be shown here waits before another is tried.
+        if (const auto refused = r.spawn_refused.find(m.leader); refused != r.spawn_refused.end() && now < refused->second) return;
         // A leader hosts one drop at a time: a new one replaces its older copies.
         for (auto &[other, copy] : r.mirrors)
             if (other.leader == m.leader) destroy_mirror(r, copy, now);
@@ -687,7 +705,8 @@ void on_message(Relay &r, std::uint64_t sender, const ThrowdownMessage &m, std::
                                                                                          : Remote::What::attempt,
                      sender, m.board, m.add, m.value, m.trick};
         if (r.running && *r.running == key) {
-            if (r.remote.size() < 512) r.remote.push_back(entry);
+            // Only a participant has turns and rows in it.
+            if (contains(r.players, sender) && r.remote.size() < 512) r.remote.push_back(entry);
         } else if ((m.leader == r.local && r.hosted && r.hosted->id == m.id) || mirror != r.mirrors.end()) {
             if (auto &list = r.early_remote[key]; list.size() < 512) list.push_back(entry);
         }
@@ -695,7 +714,7 @@ void on_message(Relay &r, std::uint64_t sender, const ThrowdownMessage &m, std::
     }
     case Kind::score:
         if (r.running && *r.running == key) {
-            r.scores[sender] = {m.value, true};
+            if (contains(r.players, sender)) r.scores[sender] = {m.value, true};
         } else if ((m.leader == r.local && r.hosted && r.hosted->id == m.id) || mirror != r.mirrors.end()) {
             r.early[key][sender] = m.value;
         }
@@ -709,6 +728,7 @@ void on_spawned(Relay &r, std::uint64_t token, std::uint32_t mmid, std::uint32_t
         if (!mmid) {
             m.state = Mirror::State::gone;
             m.gone_at = now;
+            r.spawn_refused[key.leader] = now + spawn_refused_ms;
             return;
         }
         m.mmid = mmid;
@@ -776,6 +796,13 @@ void pump_challenge(Relay &r, std::uint64_t now) {
         c.held.pop_front();
     }
 }
+// Whether a decline may be sent to `leader` now (and notes that it is).
+bool decline_due(Relay &r, std::uint64_t leader, std::uint64_t now) {
+    auto &last = r.declined[leader];
+    if (last && now >= last && now - last < decline_interval_ms) return false;
+    last = now;
+    return true;
+}
 void on_challenge_message(Relay &r, std::uint64_t sender, const ThrowdownMessage &m, std::uint64_t now) {
     const Key key{m.leader, m.id};
     if (m.kind == Kind::challenge_start) {
@@ -784,8 +811,11 @@ void on_challenge_message(Relay &r, std::uint64_t sender, const ThrowdownMessage
         // Only a party member pulls us into their challenge.
         const bool stranger = !r.party.contains(m.leader);
         if (busy || stranger || !challenge_invites_enabled.load(std::memory_order_relaxed)) {
-            send(r, message(Kind::challenge_optout, m.leader, m.id));
-            note("coop challenge from {:#x} declined ({}).", m.leader, busy ? "busy" : stranger ? "not in our party" : "invites off");
+            // One answer per leader every few seconds: repeated starts are not each answered.
+            if (decline_due(r, m.leader, now)) {
+                send(r, message(Kind::challenge_optout, m.leader, m.id));
+                note("coop challenge from {:#x} declined ({}).", m.leader, busy ? "busy" : stranger ? "not in our party" : "invites off");
+            }
             return;
         }
         if (r.challenge) return; // already joining this one
@@ -800,7 +830,7 @@ void on_challenge_message(Relay &r, std::uint64_t sender, const ThrowdownMessage
             r.plan.guest = true; r.plan.series = c.series; r.plan.id = c.challenge; r.plan.ids = c.ids;
         }
         if (!queue_challenge_start(c.series, c.challenge, c.contest)) {
-            send(r, message(Kind::challenge_optout, m.leader, m.id));
+            if (decline_due(r, m.leader, now)) send(r, message(Kind::challenge_optout, m.leader, m.id));
             std::lock_guard lock(r.mutex);
             r.plan.guest = false;
             return;
@@ -1021,6 +1051,8 @@ void reset(Relay &r, bool destroy_copies, std::uint64_t now) {
     if (destroy_copies && r.in_world && r.prepared)
         for (auto &[key, m] : r.mirrors) destroy_mirror(r, m, now);
     r.mirrors.clear();
+    r.spawn_refused.clear();
+    r.declined.clear();
     r.running.reset();
     r.scores.clear();
     r.early.clear();
@@ -1173,13 +1205,26 @@ void apply_queue_timer(Relay &r, bool linked, std::uint64_t now) {
 
 void maintain(Relay &r, std::uint64_t now) {
     if (!r.in_world) return;
-    // The event types are found once per process by a background heap scan, started as soon
-    // as the player is in a world with others so a drop never waits for it.
-    if (!r.prepared && now >= r.next_prepare) {
+    // The event types belong to the level: each one's are found by a background heap scan,
+    // started as soon as the player is in a world with others so a drop never waits for it.
+    // Asked again four times a second rather than remembered, since a level change (in a
+    // session or out of one) leaves them to be found again.
+    if (now >= r.next_prepare) {
         r.next_prepare = now + 250;
         r.prepared = prepare_throwdown_injection();
     }
+    std::erase_if(r.spawn_refused, [&](const auto &entry) { return now >= entry.second; });
+    std::erase_if(r.declined, [&](const auto &entry) { return now < entry.second || now - entry.second >= decline_interval_ms; });
     if (r.prepared) {
+        // A spawn nothing answered (the lab reports failures; this is the backstop) must not
+        // hold every other copy back.
+        for (auto &[key, m] : r.mirrors)
+            if (m.state == Mirror::State::spawning && now >= m.spawning_since && now - m.spawning_since > spawning_wait_ms) {
+                m.state = Mirror::State::gone;
+                m.gone_at = now;
+                r.spawn_refused[key.leader] = now + spawn_refused_ms;
+                note("a linked {} never spawned here; giving up on it.", m.series);
+            }
         // One spawn at a time: the server reports MMIDs in order.
         if (std::none_of(r.mirrors.begin(), r.mirrors.end(),
                          [](const auto &entry) { return entry.second.state == Mirror::State::spawning; }))
@@ -1188,7 +1233,10 @@ void maintain(Relay &r, std::uint64_t now) {
                 const auto host = virtual_id(r, key.leader);
                 if (!host) { m.state = Mirror::State::gone; m.gone_at = now; continue; }
                 m.token = r.next_token++;
-                if (queue_throwdown_spawn(m.token, host, m.series, m.placement, m.settings)) m.state = Mirror::State::spawning;
+                if (queue_throwdown_spawn(m.token, host, m.series, m.placement, m.settings)) {
+                    m.state = Mirror::State::spawning;
+                    m.spawning_since = now;
+                }
                 break;
             }
         for (auto &[key, m] : r.mirrors) {

@@ -20,8 +20,7 @@ bool cosmetic_diagnostic(const char* operation, const char* reason, std::string_
             // ..._rejected are), so a player's ordinary log says why; the rest are routine.
             const std::string_view why(reason);
             const bool routine = why == "callback_entered" || why == "unchanged" || why == "no_saved_loadout" ||
-                why == "card_only_preset_recovered" || why == "card_is_not_skater_preset" ||
-                why == "retried_after_catalog_ready";
+                why == "card_only_preset_recovered" || why == "card_is_not_skater_preset";
             const dingosdk::Json event{{"event", routine ? "local_cosmetic_loadout_diagnostic" : "local_cosmetic_loadout_rejected"},
                 {"operation", operation}, {"reason", reason}, {"preset", id}};
             dingosdk::logging::event(dingosdk::logging::Channel::customization, event.dump().c_str());
@@ -298,20 +297,14 @@ bool recover_card_only_preset(std::string_view id, const profile::CosmeticLoadou
     return true;
 }
 
-// The loadout manager's record array, or false when it cannot be read. The
-// same shape the save hook demands of a record it is handed.
-bool loadout_array(std::uintptr_t& manager, std::uintptr_t& begin, std::uintptr_t& end) {
+bool load_cosmetic_hook(const void* wrapper, void* destination) {
     auto& s = local_runtime();
-    return read(s.base + addr::engine::loadout_manager, manager) && manager &&
-        read(manager + 0x18, begin) && read(manager + 0x20, end) && begin <= end &&
-        (end - begin) % 0x48 == 0 && (end - begin) / 0x48 <= 10;
-}
-
-// A load, taking the preset id instead of the game's wrapper so that
-// retry_pending_cosmetic_loads can run it again. The caller holds native_mutex.
-bool apply_saved_loadout(const std::string& id, void* destination) {
-    auto& s = local_runtime();
+    if (!s.active.load(std::memory_order_acquire)) return s.load_cosmetic(wrapper, destination);
+    PreserveError preserve;
+    std::lock_guard lock(s.native_mutex);
+    std::string id;
     try {
+        if (!identifier(wrapper, id)) return cosmetic_diagnostic("load", "invalid_preset_id");
         const auto saved = s.store->cosmetic_loadout(id);
         if (!saved) {
             profile::CosmeticLoadout starter; std::vector<CosmeticNativeRecipe> native;
@@ -331,15 +324,14 @@ bool apply_saved_loadout(const std::string& id, void* destination) {
         profile::CosmeticLoadout defaults; std::vector<CosmeticNativeRecipe> native;
         if (!read_cosmetic_recipes(destination, defaults, native)) return cosmetic_diagnostic("load", "invalid_native_recipe", id);
         if (recover_card_only_preset(id, *saved, defaults)) return false;
-        if (!refresh_cosmetic_catalog()) {
-            // The cosmetics manager is not ready this early in a level load.
-            // The preset stays blocked, so nothing is written over the outfit
-            // on disk, and the pump applies this record once it is ready --
-            // but only while this is still the array the record came from.
-            CosmeticRuntime::PendingLoad pending{destination};
-            if (loadout_array(pending.manager, pending.begin, pending.end)) c.pending_loads[id] = pending;
-            return cosmetic_diagnostic("load", "catalog_not_ready", id);
-        }
+        // The cosmetics manager cannot be read for the first seconds of a level
+        // load, which is when the game asks for every slot up to the selected
+        // one. The catalog read before the load says the same thing (what is
+        // installed does not change with the level), so the outfit is checked
+        // against that one. Only with no catalog read yet this session is the
+        // load refused; the selection that asks is held back until one is
+        // (local_customization_outfits_loadable).
+        if (!refresh_cosmetic_catalog() && c.items.empty()) return cosmetic_diagnostic("load", "catalog_not_ready", id);
         if (saved->recipes.size() != defaults.recipes.size()) return cosmetic_diagnostic("load", "recipe_count_mismatch", id);
         const auto snapshot_shared = s.store->shared_snapshot();
         const auto& snapshot = *snapshot_shared;
@@ -350,7 +342,7 @@ bool apply_saved_loadout(const std::string& id, void* destination) {
         for (std::size_t i = 0; i < saved->recipes.size(); ++i) {
             const auto& recipe = saved->recipes[i]; const auto& expected = defaults.recipes[i];
             if (recipe.template_key != expected.template_key || recipe.template_version != expected.template_version ||
-                recipe.scalar_bits.size() != expected.scalar_bits.size() || recipe.items.size() != expected.items.size())
+                recipe.scalar_bits.size() != expected.scalar_bits.size())
                 return cosmetic_diagnostic("load", "recipe_template_mismatch", id);
             std::map<std::uint32_t, std::uint32_t> slot_categories;
             if (!cosmetic_slot_categories(native[i].resource, slot_categories))
@@ -358,11 +350,23 @@ bool apply_saved_loadout(const std::string& id, void* destination) {
             words.emplace_back(recipe.scalar_bits.size());
             std::copy(recipe.scalar_bits.begin(), recipe.scalar_bits.end(), words.back().data());
             native[i].scalars = words.back().data();
-            item_arrays.emplace_back(recipe.items.size());
-            for (std::size_t j = 0; j < recipe.items.size(); ++j) {
-                const auto* slot = &recipe.items[j];
-                if (slot->slot != expected.items[j].slot) return cosmetic_diagnostic("load", "slot_mismatch", id);
-                if (!slot->asset.empty()) {
+            // The template says which slots there are and in what order; the saved
+            // outfit is matched to it slot by slot. A mod that adds slots to a
+            // template (a wheel slot per wheel on the board) changes that list
+            // under every outfit saved before it, and again when it is switched
+            // off: a slot the outfit has no item for starts on its default, and a
+            // saved slot the template no longer has is held, so the next save
+            // keeps it for when the slot is back.
+            std::map<std::uint32_t, const profile::CosmeticSlot*> saved_slots;
+            for (const auto& item : recipe.items) saved_slots.emplace(item.slot, &item);
+            std::size_t added{};
+            item_arrays.emplace_back(expected.items.size());
+            for (std::size_t j = 0; j < expected.items.size(); ++j) {
+                const auto match = saved_slots.find(expected.items[j].slot);
+                const auto* slot = match == saved_slots.end() ? &expected.items[j] : match->second;
+                if (match == saved_slots.end()) ++added;
+                else saved_slots.erase(match);
+                if (slot != &expected.items[j] && !slot->asset.empty()) {
                     // An item that is no longer installed (a removed mod, a catalog
                     // change) or no longer fits its slot falls back to the slot's
                     // default. Rejecting the whole outfit would also block every
@@ -387,13 +391,19 @@ bool apply_saved_loadout(const std::string& id, void* destination) {
                 }
                 words.emplace_back(slot->parameter_bits.size());
                 std::copy(slot->parameter_bits.begin(), slot->parameter_bits.end(), words.back().data());
-                item_arrays.back().data()[j] = {slot->asset.c_str(), words.back().data(), cosmetic_hash(slot->asset), slot->slot};
+                item_arrays.back().data()[j] = {slot->asset.c_str(), words.back().data(), cosmetic_hash(slot->asset),
+                    expected.items[j].slot};
             }
+            for (const auto& [hash, item] : saved_slots) held.push_back({i, *item, {}});
+            if (added || !saved_slots.empty())
+                dingosdk::logging::log(dingosdk::logging::Level::info, dingosdk::logging::Channel::customization,
+                    "Saved outfit \"{}\": its slots differ from the game's (a mod that adds or removes slots): {} "
+                    "new slot(s) start on their default, {} saved slot(s) the game does not have now are kept.",
+                    id, added, saved_slots.size());
             native[i].items = item_arrays.back().data();
         }
         s.copy_cosmetic(destination, native.data(), native.data() + native.size());
         c.blocked_loadouts.erase(id);
-        c.pending_loads.erase(id);
         if (held.empty()) c.held_slots.erase(id);
         else c.held_slots[id] = std::move(held);
         dingosdk::logging::event(dingosdk::logging::Channel::customization, "{\"event\":\"local_cosmetic_loadout_loaded\"}");
@@ -402,44 +412,6 @@ bool apply_saved_loadout(const std::string& id, void* destination) {
         if (!id.empty()) cosmetic_runtime().blocked_loadouts.insert(id);
         dingosdk::logging::event(dingosdk::logging::Channel::customization, "{\"event\":\"local_cosmetic_loadout_load_failed\"}");
         return false;
-    }
-}
-
-bool load_cosmetic_hook(const void* wrapper, void* destination) {
-    auto& s = local_runtime();
-    if (!s.active.load(std::memory_order_acquire)) return s.load_cosmetic(wrapper, destination);
-    PreserveError preserve;
-    std::lock_guard lock(s.native_mutex);
-    std::string id;
-    try {
-        if (!identifier(wrapper, id)) return cosmetic_diagnostic("load", "invalid_preset_id");
-    } catch (...) {
-        return cosmetic_diagnostic("load", "invalid_preset_id");
-    }
-    return apply_saved_loadout(id, destination);
-}
-
-void retry_pending_cosmetic_loads() {
-    auto& c = cosmetic_runtime();
-    if (c.pending_loads.empty()) return;
-    std::uintptr_t manager{}, begin{}, end{};
-    // Unreadable now: keep the records and come back, rather than losing them.
-    if (!loadout_array(manager, begin, end)) return;
-    auto pending = std::move(c.pending_loads);
-    c.pending_loads.clear();
-    for (const auto& [id, load] : pending) {
-        const auto p = reinterpret_cast<std::uintptr_t>(load.destination);
-        // The same array, the same bounds, and the record still inside it on
-        // its stride. Anything else and this address may now hold another
-        // preset: give up on the outfit rather than write it over a different
-        // saved character.
-        if (!load.destination || manager != load.manager || begin != load.begin || end != load.end ||
-            p < begin || p >= end || (p - begin) % 0x48) {
-            cosmetic_diagnostic("load", "retry_record_moved", id);
-            continue;
-        }
-        if (apply_saved_loadout(id, load.destination))
-            cosmetic_diagnostic("load", "retried_after_catalog_ready", id);
     }
 }
 
@@ -470,9 +442,10 @@ void save_cosmetic_hook(std::uintptr_t manager, void* record, const char* raw_id
         if (value.recipes.size() == 1 && value.recipes.front().template_key == 2169419386U) {
             cosmetic_diagnostic("save", "card_is_not_skater_preset", id); return;
         }
-        // Keep items from costume mods that are not installed right now: a slot
-        // still showing the stand-in default saves the original item, while a
-        // slot the player changed saves the new choice and releases the hold.
+        // Keep items from costume mods that are not installed right now, and
+        // whole slots a mod added that is switched off: a slot still showing the
+        // stand-in default saves the original item, while a slot the player
+        // changed saves the new choice and releases the hold.
         if (const auto held = cosmetic_runtime().held_slots.find(id); held != cosmetic_runtime().held_slots.end()) {
             std::erase_if(held->second, [&](const CosmeticRuntime::HeldSlot& h) {
                 if (h.recipe >= value.recipes.size()) return true;
@@ -482,7 +455,10 @@ void save_cosmetic_hook(std::uintptr_t manager, void* record, const char* raw_id
                     item = h.saved;
                     return false;
                 }
-                return true;
+                // The game has no such slot now (the mod that added it is off):
+                // the saved item rides along until the slot is back.
+                value.recipes[h.recipe].items.push_back(h.saved);
+                return false;
             });
             if (held->second.empty()) cosmetic_runtime().held_slots.erase(held);
         }

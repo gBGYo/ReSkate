@@ -26,12 +26,17 @@ void register_multiplayer_commands(Commands &registry) {
                           Command{"chat", "Send a text message to everyone in the session (T opens the chat box)"},
                           Command{"server", "Send a command to the dedicated server you are an admin of (try: help)"},
                           Command{"tp", "Teleport to a player (name start) or to x y z"},
-                          Command{"party", "Your party on a dedicated server: invite|join|kick|promote <player>, "
+                          Command{"party", "Your party in a session: invite|join|kick|promote <player>, "
                                            "accept|decline [player], leave, open, close, status"},
                           Command{"tpall", "Host or server admin: teleport everyone to you"},
                           Command{"tphere", "Host or server admin: teleport one player to you"},
                           Command{"nametags", "Show or hide player nametags (on, off, toggle)"},
                           Command{"nametag-style", "ReSkate nametags or the game's own (reskate, game, toggle)"},
+                          Command{"chat-bubbles", "Show or hide chat bubbles above skaters (on, off, toggle)"},
+                          Command{"chat-bubbles-own", "Also show your own chat messages above your skater (on, off, toggle)"},
+                          Command{"chat-bubbles-distance", "How far away a player may be and still show a chat bubble, in metres (5-500)"},
+                          Command{"chat-bubbles-duration", "How many seconds a chat bubble stays before it fades (1-30)"},
+                          Command{"chat-bubbles-history", "How many recent messages stack above a skater (1-8)"},
                           Command{"score-check", "Host: keep players whose mods change scoring or physics out of throwdowns and "
                                                  "coop challenges (on, off, toggle; on by default)"},
                           Command{"retry", "Retry remote skater creation after an error"},
@@ -47,8 +52,15 @@ void register_multiplayer_commands(Commands &registry) {
         if (std::string_view(c.name) == "join-lobby")
             args.push_back(argument("lobby_id"));
         if (std::string_view(c.name) == "nametags" || std::string_view(c.name) == "nametag-style" ||
+            std::string_view(c.name) == "chat-bubbles" || std::string_view(c.name) == "chat-bubbles-own" ||
             std::string_view(c.name) == "score-check")
             args.push_back(argument("choice"));
+        if (std::string_view(c.name) == "chat-bubbles-distance")
+            args.push_back(argument("metres"));
+        if (std::string_view(c.name) == "chat-bubbles-duration")
+            args.push_back(argument("seconds"));
+        if (std::string_view(c.name) == "chat-bubbles-history")
+            args.push_back(argument("lines"));
         if (std::string_view(c.name) == "chat" || std::string_view(c.name) == "server" || std::string_view(c.name) == "party" ||
             std::string_view(c.name) == "tp" || std::string_view(c.name) == "tphere") {
             auto message = argument("message");
@@ -74,7 +86,7 @@ void register_multiplayer_commands(Commands &registry) {
     auto markers_choice = argument("on|off", Type::text, true);
     auto markers = action("mp map-markers",
                           "Named, selectable markers for your party members on the pause map, like the live game's "
-                          "(default; a lobby is one party). Off, or players outside your party: the game's plain player dots",
+                          "(default). Off, or players outside your party: the game's plain player dots",
                           Group::gameplay, {std::move(markers_choice)});
     markers.run = [](const Model &, const Values &values, const Output &out) {
         const auto &choice = std::get<std::string>(values[0]);

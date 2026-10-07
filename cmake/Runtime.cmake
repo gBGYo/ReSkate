@@ -19,6 +19,7 @@ add_library(dingosdk_runtime SHARED
     Extension/Multiplayer/Session/session_receive.cpp
     Extension/Multiplayer/Session/session_commands.cpp
     Extension/Multiplayer/Session/session_party.cpp
+    Extension/Multiplayer/Session/party_book.cpp
     Extension/UI/NativeMenu/native_menu.cpp
     Extension/UI/NativeMenu/native_menu_rows.cpp
     Extension/UI/NativeMenu/native_menu_multiplayer.cpp
@@ -59,6 +60,8 @@ add_library(dingosdk_runtime SHARED
     Extension/Multiplayer/Net/wire_codec.cpp
     Extension/Multiplayer/Net/delta_codec.cpp
     Extension/Multiplayer/Session/password.cpp
+    Extension/Multiplayer/developer_identity.cpp
+    Extension/Multiplayer/developer_identity_fetch.cpp
     Extension/Settings/console_commands.cpp
     Extension/Settings/job_spin.cpp
     Extension/Settings/engine_tweaks.cpp
@@ -86,6 +89,7 @@ add_library(dingosdk_runtime SHARED
     Extension/Assets/morph_memory_pool.cpp
     Extension/Assets/native_render_resource_pool.cpp
     Extension/World/native_entity_pages.cpp
+    Extension/World/physics_world_size.cpp
     Extension/Rendering/display_startup.cpp
     Extension/Rendering/replay_export.cpp
     Engine/Game/World/world_model.cpp
@@ -114,6 +118,12 @@ add_library(dingosdk_runtime SHARED
     Extension/Skater/physics_tuning.cpp
     Extension/Multiplayer/Remote/remote_collision.cpp
     Extension/Skater/physics_tuning_model.cpp
+    Extension/Trainer/trainer.cpp
+    Extension/Trainer/trainer_presets.cpp
+    Extension/Trainer/trainer_jump.cpp
+    Extension/Trainer/trainer_classes.cpp
+    Extension/Trainer/trainer_commands.cpp
+    Extension/Trainer/trainer_session.cpp
     Extension/Skater/offboard_flight.cpp
     Extension/Skater/camera_observer.cpp
     Extension/Boot/offline_boot.cpp
@@ -139,7 +149,11 @@ add_library(dingosdk_runtime SHARED
     Extension/News/live_news.cpp
     Extension/Objects/local_object_runtime.cpp
     Extension/Music/local_music_assets.cpp
+    Extension/Music/local_music_safety.cpp
+    Extension/Music/local_music_playback.cpp
+    Extension/Music/music_artwork.cpp
     Extension/Music/local_music_ui.cpp
+    Extension/Music/local_music_shelf.cpp
     Extension/Objects/local_buildkit_labels.cpp
     Extension/Objects/local_buildkit_limits.cpp
     Extension/Progression/local_rip_score_runtime.cpp

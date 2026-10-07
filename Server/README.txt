@@ -12,6 +12,10 @@ folder together: steam_api64.dll, steamclient64.dll, tier0_s64.dll and
 vstdlib_s64.dll are how the server talks to Steam, and world-layers.json lets it
 set world layers (time of day and so on) for everyone.
 
+Start it with --config <file> to use another settings file instead, e.g.
+ReSkateServer.exe --config grom.json. A file that does not exist yet is written
+with the defaults, as on the first run.
+
 Custom maps
 -----------
 Copy a custom map's mod folder from the game's Mods folder into a Mods folder
@@ -38,17 +42,39 @@ straight away (players are told to rejoin). Turn this off with
 
 ReSkateServer.json
 ------------------
-name               Shown in the browser (1-64 characters).
+name               Shown in the browser: 1-64 letters, numbers, spaces and - _ / [ ] ( ).
 map                The map everyone skates, named like the game's load command:
                    "San Vansterdam", "Isle of Grom", "Super Ultra Mega Resort",
                    "Stadium 1", or a custom map such as "bbcity" (see Custom maps).
+map_pool           The maps players may vote for and the rotation goes through,
+                   in order, e.g. ["San Vansterdam", "Isle of Grom", "bbcity"].
+                   Empty (the default) allows every map the server knows.
+                   Admins can still change to any map.
+map_rotation_minutes  Minutes on each map before the server moves to the next
+                   one in map_pool (default 0: off). Players get a minute's
+                   warning; the clock waits while nobody is on, and starts
+                   over whenever the map changes (by a vote or an admin too).
 max_players        1-249.
 password           Empty for anyone; otherwise players type it to join.
 welcome            A chat line sent to each player as they join.
 listed             false hides the server; players then need the code.
+steam_token        A Steam game server login token, or empty (default). Without one
+                   the server signs in anonymously and gets a new Steam ID every
+                   start. With one it keeps the same Steam ID, printed at startup.
+                   Make a token at steamcommunity.com/dev/managegameservers with
+                   App ID 3354750; each running server needs its own. Keep it
+                   private: anyone with it can sign in as your server.
+                   The ReSkate team can set the in-game server browser to show
+                   only servers that have one; the server says so in its log when
+                   that hides it. Players can always join with the code.
 auto_update        Install new ReSkate releases when nobody is on (default true).
+global_bans        Turn away players the ReSkate team has banned from multiplayer
+                   (default true). The list is read from api.reskate.dev at startup
+                   and every ten minutes. false lets them in; the server's own
+                   "bans" apply either way.
 votes              Player votes, each off until turned on:
                      "map": {"enabled": true, "percent": 60}   /vote map <map>
+                                                   (a map in map_pool)
                      "kick": {"enabled": true, "percent": 60}  /vote kick <player>
                      "time_of_day": {"enabled": true, "percent": 50}  /vote tod <time>
                                                    (needs world_layer_sync)
@@ -93,6 +119,9 @@ voice_chat         Allow voice chat.
 voice_range        How far proximity voice reaches, 50-1000 m.
 distances          When far-away players update less often (metres).
 object_placement   everyone, admins (only admins can build), or nobody.
+object_limit       How many objects each player may have placed, 1-1024
+                   (default 100), or 0 for no limit. Admins are not limited.
+                   A player at the limit deletes one to place another.
 noclip, no_bail,   Let players use noclip (and tp) / No Bail / the forward and up
 boosts             boosts (default true; admins always can).
 enforce_tuning     Players skate with the game's own Gameplay/SkatePhysicsTuning,
@@ -104,6 +133,7 @@ world_layer_sync   Force the "layers" below on every player.
 layers             World layer key -> "on" / "off".
 admins             SteamID64s (as strings) who may change settings in-game.
 bans               Players who can never join. Managed with ban / unban.
+                   The ReSkate team's own list is separate: see global_bans.
 
 Every change made from the console or by an admin is saved back to this file.
 
@@ -115,18 +145,28 @@ Admins can also type any of them in chat with a / in front (/kick, /map, /votes)
 Admins can also change the server's map by picking a level in Levels or Travel,
 and change voice, distances, placement and kicks from the Multiplayer menu.
 
+  help                          A short list of every command.
   status                        Name, map, players, code.
   players                       Connected players and their SteamID64s.
   say <text>                    Chat as the server (console only).
+  msg <player> <text>           Private message, shown to them as "[DM from <you>] ...".
+                                Name start (one word) or SteamID64.
+  msg-party <player> <text>     Message everyone in that player's party ("[DM from <you> to party]").
+  msg-admins <text>             Message every admin who is online ("[DM from <you> to admins]").
+                                Players can whisper each other with /w <player> <text> in chat.
   kick <player>                 Until the server restarts. Name start or SteamID64.
                                 Admins cannot kick or ban each other; the console can.
   ban <player or id> [name]     For good.   unban <id>   bans
   map <name>                    e.g. map San Vansterdam, map grom, map bbcity
   maps                          The maps this server knows.
+  map-pool [add|remove <map>|clear]   The maps players vote between and the
+                                rotation uses (see map_pool).
+  rotation [<minutes>|off]      Change the map on a timer (see map_rotation_minutes).
   name <text>   password <text|off>   welcome <text|off>   listed on|off
   tps 20|30|60|120   voice on|off   voice-range <m>
   distances <full> <half> <half-return> <low>
   placement everyone|admins|nobody   clear-objects
+  objects <number>|off          How many objects each player may have placed.
   noclip on|off   nobail on|off   boosts on|off
                                 What players may use (admins always can).
   tuning on|off                 Everyone on the game's own physics tuning.
@@ -134,6 +174,7 @@ and change voice, distances, placement and kicks from the Multiplayer menu.
   tphere <player>               One player to you (admins in game).
   park <construction|historic|financial> <layout>
   layer-sync on|off   layer <key> default|on|off
+  layers <key>=<mode> ...       Several world layers at once, each default, on or off.
   tod <default|morning|noon|afternoon|evening|night|weatherday|weathernight>
                                 Time of day on every map (needs layer-sync on).
   votes [map|kick|tod on|off|<percent>]   The vote settings (see votes).
@@ -148,4 +189,5 @@ and change voice, distances, placement and kicks from the Multiplayer menu.
   score-allow [<fingerprint>|remove <fingerprint>]   Accept a scoring mod's
                                 fingerprint like the game's own (or list them).
   admin add|remove <player or id>   admins      (console only)
-  quit
+  update                        Check for a new release and install it now (console only).
+  quit, exit or stop            Shut the server down (console only).

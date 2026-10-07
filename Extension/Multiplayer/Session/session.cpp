@@ -3,6 +3,7 @@
 #include "Extension/Multiplayer/Hud/native_indicators.h"
 #include "Extension/Multiplayer/Hud/native_party.h"
 #include "party_book.h"
+#include "Engine/Game/World/world_names.h"
 #include "Extension/Multiplayer/Remote/native_skater.h"
 #include "Extension/Multiplayer/Hud/custom_nametags.h"
 #include "Extension/Multiplayer/Hud/follow_camera.h"
@@ -19,6 +20,7 @@
 #include "Extension/Skater/physics_tuning.h"
 #include "Extension/Multiplayer/Remote/remote_collision.h"
 #include "Engine/Core/Log/logging.h"
+#include "Engine/Core/Text/word_filter.h"
 #include "Engine/Game/Multiplayer/session_tools.h"
 #include "Engine/Game/UI/game_view.h"
 #include <Windows.h>
@@ -71,10 +73,14 @@ void stop(Session &s, std::string reason) {
     s.voice_policy = {};
     s.tps = multiplayer_default_tps;
     s.object_placement = ObjectPlacement::everyone;
+    s.object_limit = 0;
+    set_lobby_object_limit(0);
     s.server_admin = false;
     s.server_bans.clear();
     s.server_ban_total = 0;
     s.server_maps.clear();
+    s.server_map_pool.clear();
+    s.server_map_rotation = 0;
     set_lobby_object_placement_allowed(true);
     s.guest_noclip = s.guest_no_bail = s.guest_boosts = true;
     s.enforce_tuning = true;
@@ -86,12 +92,19 @@ void stop(Session &s, std::string reason) {
     s.sent_tuning.reset();
     s.tuning_packet.clear();
     s.next_tuning_check = 0;
+    s.host_extras.reset();
+    s.sent_extras = 0;
+    s.extras_packet.clear();
+    s.next_extras_check = 0;
+    set_session_tuning_enforced(false);
+    set_host_physics_extras({});
     s.server_votes = 0;
     set_session_tools_allowed(true, true, true);
     s.object_clears.reset();
     s.clear_pending = false;
     s.force_world_layers = false;
     s.banned.clear();
+    s.join_backoff = {};
     apply_host_world_layers(false, s.layers);
     s.layers = default_world_layers();
     clear_remote_network_objects();
@@ -100,6 +113,8 @@ void stop(Session &s, std::string reason) {
     set_lobby_park_mode(false, false);
     s.parks = {}; s.next_park_update = 0;
     s.next_party_update = 0;
+    s.parties = PartyBook{};
+    s.parties_revision = 0;
     s.client_timing = {};
     s.next_publish = 0;
     s.last_client_log = 0;
@@ -118,6 +133,7 @@ void stop(Session &s, std::string reason) {
     s.awaiting_map = s.join_map_authorized = s.map_load_submitted = false;
     s.join_started = s.last_map_request = s.last_map_load_check = 0;
     s.join_destination.clear();
+    s.map_label.clear();
     s.world = 1;
     s.travelling = false;
     s.host_world_ready = true;
@@ -244,23 +260,34 @@ void publish_party(Session &s) {
     }
     if (!s.display_preferences_loaded) {
         s.display_preferences_loaded = true;
-        // A lobby is one party unless the player turned that off (the older PartyOverlay
-        // preference, off by default, is not carried over).
-        s.party_overlay = profile_runtime::local_preference("LobbyParty").value_or(true);
         s.nametags = profile_runtime::local_preference("Nametags").value_or(true);
         s.custom_nametags = profile_runtime::local_preference("CustomNametags").value_or(true);
         s.chat_visible = profile_runtime::local_preference("ChatVisible").value_or(true);
         s.chat_filter = profile_runtime::local_preference("ChatFilter").value_or(true);
+        s.chat_bubbles = profile_runtime::local_preference("ChatBubbles").value_or(true);
+        s.chat_bubbles_own = profile_runtime::local_preference("ChatBubblesOwn").value_or(false);
+        if (const auto saved = profile_runtime::local_value("ChatBubblesDistance"); saved && saved->is_number())
+            s.chat_bubbles_distance = std::clamp(saved->get<float>(), 5.f, 500.f);
+        if (const auto saved = profile_runtime::local_value("ChatBubblesDuration"); saved && saved->is_number())
+            s.chat_bubbles_duration = std::clamp(saved->get<float>(), 1.f, 30.f);
+        if (const auto saved = profile_runtime::local_value("ChatBubblesHistory"); saved && saved->is_number())
+            s.chat_bubbles_history = std::clamp(static_cast<int>(saved->get<double>()), 1, 8);
+        show_own_tag(profile_runtime::local_preference("IdentityTag").value_or(true));
+        show_own_items(profile_runtime::local_preference("IdentityItems").value_or(true));
+        if (const auto saved = profile_runtime::local_value("IdentityStyles"); saved && saved->is_string())
+            if (const auto styles = developer_hoodie_detail::parse_mark_styles(saved->string()))
+                developer_hoodie_detail::own_styles.store(*styles);
         apply_nametags(s);
     }
-    // The party's limit: a lobby is one party of up to its capacity; a dedicated server's
-    // parties hold up to eight (the game's Party panel rows).
+    // The party's limit: parties players form hold up to eight (the game's Party panel rows),
+    // in a lobby as on a dedicated server.
+    const bool session = s.mode == Mode::host || s.mode == Mode::join;
     const auto capacity = s.mode == Mode::off ? static_cast<unsigned>(max_players)
-                        : dedicated_host(s) ? static_cast<unsigned>(PartyBook::default_limit) : s.capacity;
-    // A party formed on a dedicated server is always the game's party (its Social menu, Coop
-    // button, beacons...); a lobby is one too unless the player turned Lobby party off.
-    set_native_party_changes(dedicated_host(s));
-    const bool shown = dedicated_host(s) ? s.local_party != 0 : s.mode != Mode::off && s.party_overlay;
+                        : session ? static_cast<unsigned>(PartyBook::default_limit) : s.capacity;
+    // A party the player formed is the game's party (its Social menu, Coop button, beacons...).
+    // Nobody is in one just for being in the same lobby or on the same server.
+    set_native_party_changes(session);
+    const bool shown = session ? s.local_party != 0 : s.mode != Mode::off;
     update_native_party(s.base, roster, capacity, shown);
 }
 // Links the players' own throwdowns (Extension/Throwdowns/throwdown_relay.cpp). Runs
@@ -341,12 +368,11 @@ Pose out_of_sight(Pose pose) {
 // local skater and the camera: every frame within 200 m, 20 Hz past it, 10 Hz past 350 m, and
 // every frame again once back inside 190 m. Between samples the skater keeps its pose, which
 // saves the interpolation, the pose copy and the skeleton write for players too far away to see.
+// Only distance decides. Players out of the camera's view were sampled at 20 Hz as well for a
+// while (it saved client-tick time on busy servers), but the game's replays record every skater
+// as it stood each frame and their camera looks wherever it likes afterwards: a player who had
+// been behind the camera moved at 20 Hz in the replay.
 constexpr int far_full_rate_return = 190, far_half_rate_start = 200, far_low_rate_start = 350;
-// Out of the camera's view, players past this many metres are sampled at 20 Hz too: the whole-
-// skeleton interpolation grows with the player count and was most of ReSkate's client-tick cost
-// on busy servers (profiled 2026-10-03). Nearer ones stay every frame for collision and close
-// shadows; one coming into view is sampled that frame.
-constexpr float out_of_view_full_rate = 8.0f;
 // Metres from a player to the nearer of the local skater and the camera (infinite if neither
 // is known).
 float nearest_distance(const Peer &p, const NativeFrame &local, const std::optional<GameView> &view) {
@@ -360,23 +386,6 @@ float nearest_distance(const Peer &p, const NativeFrame &local, const std::optio
     if (view) consider(view->world[12], view->world[13], view->world[14]);
     return std::sqrt(nearest);
 }
-// Whether a player is certainly outside the camera's view: a 2 m sphere around their body past
-// the camera, or past a side, top or bottom of its view (taken as wide as a 21:9 screen).
-bool out_of_view(const Peer &p, const std::optional<GameView> &view) {
-    if (!view || !(view->vertical_fov > 1 && view->vertical_fov < 175)) return false;
-    const auto &m = view->world;
-    const auto &at = p.render_pose.root.position;
-    const float dx = at[0] - m[12], dy = at[1] + 1.0f - m[13], dz = at[2] - m[14];
-    const float depth = -(dx * m[8] + dy * m[9] + dz * m[10]);
-    const float side = dx * m[0] + dy * m[1] + dz * m[2], height = dx * m[4] + dy * m[5] + dz * m[6];
-    constexpr float radius = 2.0f;
-    if (depth < -radius) return true;
-    const float tan_v = std::tan(view->vertical_fov * 3.14159265f / 360.0f), tan_h = tan_v * (21.0f / 9.0f);
-    const auto outside = [&](float offset, float tangent) {
-        return std::abs(offset) - depth * tangent > radius * std::sqrt(1.0f + tangent * tangent);
-    };
-    return outside(side, tan_h) || outside(height, tan_v);
-}
 std::uint64_t far_sample_interval(const Peer &p, float distance) {
     const auto beyond = [&](int metres) { return distance > static_cast<float>(metres); };
     if (!std::isfinite(distance) || !beyond(far_full_rate_return)) return 0;
@@ -387,10 +396,43 @@ std::uint64_t far_sample_interval(const Peer &p, float distance) {
 void render(Session &s, std::uintptr_t client, const NativeFrame &local, std::uint64_t now) {
     if (!world_playing(s, local)) return;
     const auto view = latest_game_view();
-    // ReSkate's nametags: every shown player, placed above their head each frame.
+    // ReSkate's nametags and chat bubbles: every shown player, placed above their head
+    // each frame.
     std::vector<NametagPlayer> nametags;
-    const bool labels = s.nametags && s.custom_nametags;
+    const bool bubbles = s.chat_bubbles;
+    const bool labels = (s.nametags && s.custom_nametags) || bubbles;
     if (labels) refresh_friends(s);
+    // The newest chat lines from `sender` still inside the bubble duration, oldest first,
+    // filtered the same way the chat panel filters them, each with the opacity it has left
+    // (it fades over the last half second). At most `chat_bubbles_history` lines.
+    const auto recent_bubbles = [&](std::uint64_t sender) {
+        std::vector<NametagBubble> result;
+        if (!bubbles) return result;
+        const int limit = std::max(1, s.chat_bubbles_history);
+        const auto duration = static_cast<std::uint64_t>(std::max(0.5f, s.chat_bubbles_duration) * 1e6f);
+        const auto fade_from = std::min<std::uint64_t>(duration, 500000);
+        for (auto it = s.chat.rbegin(); it != s.chat.rend() && static_cast<int>(result.size()) < limit; ++it) {
+            if (it->sender != sender) continue;
+            // Older lines are older still: once one has expired, stop.
+            if (now < it->received || now - it->received >= duration) break;
+            NametagBubble line;
+            line.text = it->text;
+            if (s.chat_filter) {
+                const auto masked = s.chat_masked.find(it->sequence);
+                auto filtered = masked != s.chat_masked.end() ? masked->second.second : text::mask_bad_words(it->text);
+                if (filtered != it->text) line.raw = std::exchange(line.text, std::move(filtered));
+            }
+            if (line.text.find_first_not_of(' ') == std::string::npos) continue;
+            const auto age = now - it->received;
+            // Pops in over the first few frames, fades over the last half second.
+            constexpr std::uint64_t pop_us = 220000;
+            line.appear = std::min(1.0f, static_cast<float>(age) / static_cast<float>(pop_us));
+            line.fade = fade_from ? std::min(1.0f, static_cast<float>(duration - age) / static_cast<float>(fade_from)) : 1.0f;
+            result.push_back(std::move(line));
+        }
+        std::reverse(result.begin(), result.end()); // oldest first
+        return result;
+    };
     // Who is talking, as last published for the UI (10 Hz), without copying the voice model.
     const auto &voices = s.view.voice.players;
     const auto label = [&](const Peer &p) {
@@ -401,6 +443,7 @@ void render(Session &s, std::uintptr_t client, const NativeFrame &local, std::ui
         // The same role colour and badge the player's chat lines get.
         std::tie(tag.color, tag.tag) = player_role(s, p.member.id, false);
         tag.talking = std::any_of(voices.begin(), voices.end(), [&](const auto &v) { return v.id == p.member.id && v.speaking; });
+        tag.bubbles = recent_bubbles(p.member.id);
         nametags.push_back(std::move(tag));
     };
     // Creating a player's actor (skater, skateboard and both recipes) or re-applying a
@@ -435,6 +478,10 @@ void render(Session &s, std::uintptr_t client, const NativeFrame &local, std::ui
             p.next_audio_update = 0;
         }
     };
+    // The developer hoodie and board mark an identity: only one Steam vouches for (steam_vouched).
+    const auto developer_id = [&](const Peer &p) {
+        return steam_vouched(s, p) && shows_items(p) ? p.member.id : std::uint64_t{};
+    };
     each_active_peer(s, [&](Peer &p) {
         // A dedicated server has no skater to show.
         if (!p.member.id || (dedicated_host(s) && p.member.id == s.host_id))
@@ -442,10 +489,11 @@ void render(Session &s, std::uintptr_t client, const NativeFrame &local, std::ui
         const bool was_visible = p.visible;
         // A far player between samples: their skater keeps its pose; sound, the label and
         // the spectate position are still refreshed (sound events are released one per frame).
-        if (was_visible && local.ready && !p.render_failed && p.far_interval && now < p.next_far_sample &&
-            !(p.far_for_view && !out_of_view(p, view))) {
-            update_developer_hoodie(s.base, remote_skater_entity(), p.member.id, remote_skater_generation(), p.developer_hoodie);
-            update_developer_board(s.base, remote_board_entity(), p.member.id, remote_skater_generation(), p.developer_board);
+        if (was_visible && local.ready && !p.render_failed && p.far_interval && now < p.next_far_sample) {
+            update_developer_hoodie(s.base, remote_skater_entity(), developer_id(p), remote_skater_generation(), p.developer_hoodie,
+                                    mark_styles(p));
+            update_developer_board(s.base, remote_board_entity(), developer_id(p), remote_skater_generation(), p.developer_board,
+                                   mark_styles(p));
             present_audio(p);
             update_party_position(&p.render_pose);
             if (labels) label(p);
@@ -457,7 +505,9 @@ void render(Session &s, std::uintptr_t client, const NativeFrame &local, std::ui
                                                        : p.poses.sample_remote(now, p.render_pose);
             // Showing a player without an actor spawns one (native_skater_spawn.cpp).
             const bool spawning = sampled && p.appearance.value() && !was_visible && !remote_skater_entity();
-            if (spawning && native_pass) {
+            if (spawning && now < p.next_spawn) {
+                p.native_status = "Waiting to show the player again.";
+            } else if (spawning && native_pass) {
                 p.native_status = "Waiting for another player's skater to finish spawning.";
             } else if (sampled && p.appearance.value()) {
                 if (spawning) {
@@ -472,9 +522,6 @@ void render(Session &s, std::uintptr_t client, const NativeFrame &local, std::ui
                                         p.native_status);
                 const auto distance = nearest_distance(p, local, view);
                 p.far_interval = p.visible && !hidden ? far_sample_interval(p, distance) : 0;
-                p.far_for_view = p.visible && !hidden && !p.far_interval && std::isfinite(distance) &&
-                                 distance > out_of_view_full_rate && s.mode != Mode::echo && out_of_view(p, view);
-                if (p.far_for_view) p.far_interval = 50000;
                 p.next_far_sample = now + p.far_interval;
                 // The native work a far player's skater may skip (puppet_cost.cpp).
                 if (p.visible) note_remote_distance(distance);
@@ -514,16 +561,18 @@ void render(Session &s, std::uintptr_t client, const NativeFrame &local, std::ui
                     remove_remote(s.base);
                 }
             } else {
-                if (was_visible)
+                if (was_visible) {
                     remove_remote(s.base);
+                    p.next_spawn = now + 3000000;
+                }
                 p.native_status =
                     sampled ? "Waiting for the player's cosmetic recipe." : "Waiting for player poses.";
             }
         }
-        update_developer_hoodie(s.base, p.visible ? remote_skater_entity() : 0, p.member.id,
-                                 remote_skater_generation(), p.developer_hoodie);
-        update_developer_board(s.base, p.visible ? remote_board_entity() : 0, p.member.id,
-                               remote_skater_generation(), p.developer_board);
+        update_developer_hoodie(s.base, p.visible ? remote_skater_entity() : 0, developer_id(p),
+                                 remote_skater_generation(), p.developer_hoodie, mark_styles(p));
+        update_developer_board(s.base, p.visible ? remote_board_entity() : 0, developer_id(p),
+                               remote_skater_generation(), p.developer_board, mark_styles(p));
         if (!p.visible) {
             stop_remote_audio();
             p.presented_audio.reset();
@@ -535,9 +584,22 @@ void render(Session &s, std::uintptr_t client, const NativeFrame &local, std::ui
             }
         }
     });
+    // The local player's own lines, above their own skater, when asked for.
+    if (labels && bubbles && s.chat_bubbles_own && local.ready) {
+        auto own = recent_bubbles(s.transport.status().local_id);
+        if (!own.empty()) {
+            NametagPlayer tag;
+            tag.head = local.pose.root.position;
+            tag.head[1] += 1.0f;
+            tag.self = true;
+            tag.bubbles = std::move(own);
+            nametags.push_back(std::move(tag));
+        }
+    }
     if (labels)
         publish_custom_nametags(s.base, std::move(nametags),
-                                local.ready ? std::optional(local.pose.root.position) : std::nullopt);
+                                local.ready ? std::optional(local.pose.root.position) : std::nullopt,
+                                s.nametags && s.custom_nametags, bubbles, s.chat_bubbles_distance);
 }
 } // namespace
 MultiplayerModel model() {
@@ -545,6 +607,7 @@ MultiplayerModel model() {
     std::lock_guard lock(s.mutex);
     return s.view;
 }
+std::string take_leave_notice() { return std::exchange(session().leave_notice, {}); }
 MultiplayerChat chat() {
     auto &s = session();
     std::lock_guard lock(s.mutex);
@@ -637,6 +700,14 @@ bool prepare_join_map(Session &s, bool ready, std::string_view current, MapLoade
         s.last_map_load_check = now;
         std::string detail;
         const auto result = loader(s.join_destination, s.map_load_submitted, detail);
+        if (result == MapLoadResult::missing) {
+            const auto name = s.map_label.empty() ? world_level_name(world_destination_asset(s.join_destination)) : s.map_label;
+            const char *who = dedicated_host(s) ? "server" : "host";
+            s.leave_notice = (s.travelling ? std::string("The ") + who + " moved to " : std::string("The ") + who + " is on ") +
+                             name + ", which is not installed on this PC. Install its map mod and join again.";
+            stop(s, s.leave_notice);
+            return false;
+        }
         if (result == MapLoadResult::failed) {
             stop(s, detail.empty() ? "The host's map could not be loaded." : std::move(detail));
             return false;
@@ -693,6 +764,7 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool ready, std::string_vi
         expire_remote_collision(base, now_us());
         if (s.mode == Mode::off) {
             physics_tuning::release(base); // the player's own tuning again after a session
+            set_session_tuning_enforced(false);
             relay_throwdowns(s, ready);
             // Without a session the UI model follows at the same 10 Hz as in one;
             // commands still publish at once.

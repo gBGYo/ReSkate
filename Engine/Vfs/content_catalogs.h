@@ -2,6 +2,7 @@
 #include "Engine/Core/Json/json.h"
 #include <cstdint>
 #include <filesystem>
+#include <map>
 #include <set>
 #include <string>
 #include <vector>
@@ -40,6 +41,17 @@ struct Catalogs {
     std::vector<TravelLocation> travel_locations;
     // Access point id (accesspoint_*) -> the location ids it offers.
     std::vector<std::pair<std::string, std::vector<std::string>>> travel_access_points;
+    // Music playlist id -> {display name, artwork id, track ids} from the music
+    // chunk. A music record carries a field-10 message (10.10 name, 10.11
+    // artwork) and repeated field-2 tracks; owned items use a varint field 10.
+    struct MusicPlaylistEntry {
+        std::string name, artwork;
+        std::vector<std::string> tracks;
+    };
+    std::map<std::string, MusicPlaylistEntry, std::less<>> music_playlists;
+    // Song ("Artist - Title") -> its cdn:/ cover art: a song record carries a field-10 message
+    // (10.10 artist, 10.11 title, 10.12 artwork).
+    std::map<std::string, std::string, std::less<>> music_song_artwork;
     bool reserved(const std::string& key) const;
 };
 // Read once, on first use. Empty (available == false) when no pack is installed.

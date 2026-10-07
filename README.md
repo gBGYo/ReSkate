@@ -12,10 +12,9 @@ the launcher, the runtime that loads into the game, and the dedicated server.
   and the game runs even with Steam closed.
 - **Multiplayer.**
   - Host a Steam lobby for up to 32 players: public, or joined with a code, with an optional password.
-    Everyone in a lobby is in one party.
   - Join dedicated servers from the in-game server browser.
   - Proximity voice chat, and text chat with emotes and an optional bad-word filter.
-  - Parties on dedicated servers: invite, join, leave, promote.
+  - Parties in lobbies and on dedicated servers: invite, join, leave, promote.
   - Throwdowns with other players (Jam, Spot Battle and S.K.A.T.E.), and co-op challenges.
 - **In-game menu and console.**
   - Map and fast travel.
@@ -268,6 +267,32 @@ the full-mode work. No extracted game assets are shipped.
 - In game, the **MODS** tab of the ReSkate menu (**Insert**) turns mods on and off and applies the changes.
 - Mods are checked against the game build they were made for. Outdated mods, or mods that can't be merged
   cleanly, are left out with a message naming them, and the rest still load.
+- A mod that adds songs can give them their own playlist in the game's music screen with a
+  `reskate-music.json` in its folder:
+
+  ```json
+  {"schema": 1, "playlists": [{"name": "My Playlist", "songs": ["Artist - Title", "Artist - Other Title"]}]}
+  ```
+
+  Each entry is the song's artist and title exactly as the mod registers them, joined by ` - `. Entries that
+  match no song are ignored, and a playlist with no matching songs is not shown. A file that does not follow
+  this shape is skipped and logged. The songs themselves still have to be added by the mod.
+
+  Optional playlist and track covers are PNG files packaged inside the mod:
+
+  ```json
+  {
+    "schema": 1,
+    "playlists": [{"name": "My Playlist", "artwork": "artwork/playlist.png", "songs": ["Artist - Title"]}],
+    "song_artwork": {"Artist - Title": "artwork/track.png"}
+  }
+  ```
+
+  Artwork paths are relative to the mod folder and use forward slashes. Images must be PNGs, at most
+  2048x2048 and 4 MiB each. Missing or invalid covers are ignored without removing the playlist or song.
+  ReSkate serves registered image bytes through a process-local HTTP endpoint bound only to `127.0.0.1`
+  on an automatically selected port; no internet hosting is needed. The endpoint exposes no filesystem
+  routes and retains at most 64 MiB of artwork. Existing content-cache covers keep their priority.
 
 Only install mods you trust. Mods change game data, and custom scripts can run code.
 
@@ -336,9 +361,11 @@ Useful launcher flags:
 |---|---|
 | `--no-gui` | start the game straight away, without the launcher window |
 | `--no-update` | skip the update check |
-| `--offline` | play offline, without Steam running |
+| `--offline`, `-offline` | play offline, without Steam running |
 | `--windowed`, `--width=N`, `--height=N` | windowed mode and its size |
-| `--log-level=<trace\|debug\|info\|warning\|error>` | how much `ReSkate.log` records |
+| `--log-level=<trace\|debug\|info\|warning\|error\|critical\|off>` | how much `ReSkate.log` records (`warn` works too) |
+| `--log-trace` | the same as `--log-level=trace`; an explicit `--log-level` wins |
+| `-wconsole` | also show the log live in a console window while the game runs |
 | `--menu-key=0x2D`, `--console-key=0xC0` | menu and console keys (virtual-key codes) |
 | `--no-loose-files` | ignore loose Lua and config files beside the game |
 | `--gpu-diagnostics` | record extra detail when the graphics driver crashes (DRED) |

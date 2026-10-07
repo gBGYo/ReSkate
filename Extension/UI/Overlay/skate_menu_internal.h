@@ -42,6 +42,7 @@ void debug_request(SkateMenu& menu, const CallbacksV3& callbacks, DebugRequest r
 // HOST shows the host form until a session exists, then that session (SESSION).
 inline constexpr int multiplayer_session_tab = 1, multiplayer_voice_tab = 2, multiplayer_bans_tab = 3;
 void multiplayer_display_settings(SkateMenu&, const Model&);
+void special_page(SkateMenu&, const Model&, const CallbacksV3&);
 void multiplayer_network_page(SkateMenu&, const Model&, const CallbacksV3&);
 void atmosphere_menu(SkateMenu&, const Model&, const CallbacksV3&);
 void progression_page(SkateMenu&, const Model&, const CallbacksV3&);
@@ -55,4 +56,7 @@ void settings_page(SkateMenu&, const Model&, const CallbacksV3&);
 // Settings > Post FX (skate_menu_world.cpp).
 void graphics_page(SkateMenu&, const Model&, const CallbacksV3&);
 void developer_page(SkateMenu&, const Model&, const CallbacksV3&);
+// Extension/Trainer/trainer_page.cpp
+void trainer_page(SkateMenu&, const Model&, const CallbacksV3&);
+bool trainer_page_wanted();
 }

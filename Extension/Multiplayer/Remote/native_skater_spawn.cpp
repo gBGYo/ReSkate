@@ -252,10 +252,12 @@ std::string show_board(std::uintptr_t base, const NativeFrame &local, const Pose
             require(!r.board_failed, r.board_issue.c_str());
         }
         if (pose.board.empty()) {
+            if (r.board_entity) r.next_board_create = GetTickCount64() + 2000;
             remove_board(base);
             return "Waiting for skateboard pose.";
         }
         if (!r.board_entity) {
+            if (GetTickCount64() < r.next_board_create) return "Waiting to show the skateboard again.";
             const auto local_board = read_native_board(readable, base, local.entity);
             if (!local_board.entity || local_board.entity != local.board_entity)
                 return "Waiting for the local skateboard blueprint.";
@@ -418,7 +420,7 @@ void remove_remote(std::uintptr_t base) noexcept {
         r.target = {};
         r.pose_driven.store(false, std::memory_order_release);
         r.next_native_animation = r.next_safety_audit = r.next_entity_audit = r.next_board_safety_audit =
-            r.next_board_status = r.next_status = 0;
+            r.next_board_status = r.next_status = r.next_board_create = 0;
         r.failed = false;
         r.issue.clear();
         r.board_failed = false;

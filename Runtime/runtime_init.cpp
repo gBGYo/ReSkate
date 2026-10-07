@@ -14,6 +14,7 @@
 #include "Extension/Progression/entitlement_request_hook.h"
 #include "Extension/Skater/skater_observer.h"
 #include "Extension/UI/NativeMenu/native_menu.h"
+#include "Extension/Throwdowns/throwdown_lab.h"
 #include "Extension/Multiplayer/Session/session.h"
 #include "Extension/Throwdowns/throwdown_debug_text.h"
 #include "Extension/Multiplayer/Hud/custom_nametags.h"
@@ -416,6 +417,7 @@ extern "C" __declspec(dllexport) BOOL WINAPI DingoSDKDebugInitialize() {
                 dingosdk::slam::before_level_transition(next);
                 dingosdk::local_profile_before_level_transition(next);
                 dingosdk::multiplayer::native_menu_before_level_transition(base, next);
+                dingosdk::multiplayer::throwdown_lab_before_level_transition(next);
             });
         if (!r.native_loading_logging) dingosdk::logging::write(dingosdk::logging::Level::warning,
             dingosdk::logging::Channel::ui, "Native ReSkate menu disabled: shutdown cleanup hook is unavailable.");

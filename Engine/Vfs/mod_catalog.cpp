@@ -139,14 +139,8 @@ Catalog load_catalog(const std::filesystem::path& data_root, const MergeObserver
             if (!entry.enabled) {
                 result.notes.push_back("Mod disabled in mods.json: " + entry.mod.name);
                 result.disabled.push_back(entry.mod.name);
-                if (entry.mod.provides_layout && result.inactive.size() < maximum_mods)
-                    result.inactive.push_back(std::move(entry.mod));
+                if (entry.mod.provides_layout) result.inactive.push_back(std::move(entry.mod));
                 continue;
-            }
-            if (result.mods.size() >= maximum_mods) {
-                result.notes.push_back("More than " + std::to_string(maximum_mods) +
-                    " mods are present; " + entry.mod.name + " and any later mod were skipped");
-                break;
             }
             if (!entry.mod.provides_layout && !entry.mod.provides_levels && entry.mod.park_maps.empty())
                 result.notes.push_back("Mod " + entry.mod.name + " has no layout.toc or reskate-levels.json");

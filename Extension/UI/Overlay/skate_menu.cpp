@@ -276,12 +276,13 @@ ImFont* embedded_font(const wchar_t* name, float size, const ImWchar* ranges) {
         &config, ranges);
 }
 
-enum Page { map, world, build, skater, multiplayer, progress, mods, settings, developer, page_count };
+enum Page { map, world, build, skater, training, multiplayer, progress, mods, settings, special, developer, page_count };
 constexpr std::array<const char*, page_count> page_names{
-    "MAP", "WORLD", "BUILD", "SKATER", "MULTIPLAYER", "PROGRESS", "MODS", "SETTINGS", "DEVELOPER"};
+    "MAP", "WORLD", "BUILD", "SKATER", "TRAINER", "MULTIPLAYER", "PROGRESS", "MODS", "SETTINGS", "SPECIAL", "DEVELOPER"};
 constexpr std::array<const char*, page_count> page_subtitles{
-    "Pick your spot.", "Set the vibe.", "Make the park yours.", "Ride it your way.",
-    "Bring your crew.", "Pick up where you want.", "Bring your own.", "Your controls, your screen.", "Under the hood."};
+    "Pick your spot.", "Set the vibe.", "Make the park yours.", "Ride it your way.", "Tune it. Drill it. Measure it.",
+    "Bring your crew.", "Pick up where you want.", "Bring your own.", "Your controls, your screen.", "Not everyone gets this page.",
+    "Under the hood."};
 }
 
 void load_skate_fonts(SkateMenu& menu) {
@@ -366,14 +367,20 @@ void draw_skate_menu(SkateMenu& menu, const Model& model, const CallbacksV3& cal
             skate_theme::rotate_since(draw, start, -4.0f, ImVec2(at.x + extent.x * .5f, at.y + extent.y * .5f));
         }
         draw->AddText(menu.body, px(12), ImVec2(origin.x + px(18), origin.y + px(66)), muted, "YOUR SESSION. YOUR RULES.");
+        if (trainer_page_wanted()) menu.page = training;
         menu.page = std::clamp(menu.page, 0, static_cast<int>(page_count) - 1);
         // Developer (the network view) is hidden for now; offline there is no Multiplayer either.
-        if (menu.page == developer || (model.steam_offline && menu.page == multiplayer)) menu.page = map;
+        // Special is only there for a player the backend lists.
+        const auto hidden = [&](int page) {
+            return page == developer || (model.steam_offline && page == multiplayer) ||
+                   (page == special && model.multiplayer.identity_tag.empty());
+        };
+        if (hidden(menu.page)) menu.page = map;
         ImGui::SetCursorPos(ImVec2(px(10), px(96)));
         ImGui::BeginChild("navigation", ImVec2(sidebar - px(20), size.y - px(140)), ImGuiChildFlags_None);
         const float tab_height = px(40);
         for (int i = 0; i < static_cast<int>(page_count); ++i) {
-            if (i == developer || (model.steam_offline && i == multiplayer)) continue;
+            if (hidden(i)) continue;
             const auto at = ImGui::GetCursorScreenPos();
             const bool selected = menu.page == i;
             ImGui::PushID(i);
@@ -419,6 +426,7 @@ void draw_skate_menu(SkateMenu& menu, const Model& model, const CallbacksV3& cal
         case world: world_page(menu, model, callbacks); break;
         case build: build_page(menu, model, callbacks); break;
         case skater: skater_page(menu, model, callbacks); break;
+        case training: trainer_page(menu, model, callbacks); break;
         case multiplayer: multiplayer_page(menu, model, callbacks); break;
         case progress: progression_page(menu, model, callbacks); break;
         case mods:
@@ -430,6 +438,7 @@ void draw_skate_menu(SkateMenu& menu, const Model& model, const CallbacksV3& cal
             ImGui::PopID();
             break;
         case settings: settings_page(menu, model, callbacks); break;
+        case special: special_page(menu, model, callbacks); break;
         case developer: developer_page(menu, model, callbacks); break;
         }
         if (!menu.feedback.empty() && ImGui::GetTime() < menu.feedback_until) {

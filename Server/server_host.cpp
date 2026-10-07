@@ -1,6 +1,7 @@
 #include "server_host.h"
 #include "server_text.h"
 #include "Extension/Multiplayer/Net/wire_codec.h"
+#include "Extension/Multiplayer/developer_identity.h"
 #include "Extension/Multiplayer/Session/monotonic_clock.h"
 #include "Engine/Core/Text/word_filter.h"
 #include "Engine/Game/Build/supported_build.h"
@@ -41,21 +42,16 @@ std::uint64_t nonce() {
     return value;
 }
 constexpr std::string_view help_text =
-    "status | players | say <text> | kick <player> | ban <player or SteamID64> [name] | unban <SteamID64> | bans\n"
+    "status | players | say <text> | msg <player> <text> | msg-party <player> <text> | msg-admins <text> | kick <player> | ban <player or SteamID64> [name] | unban <SteamID64> | bans\n"
     "map <name, e.g. San Vansterdam> | maps | name <text> | password <text|off> | welcome <text|off> | listed on|off\n"
     "tps 20|30|60|120 | voice on|off | voice-range <50-1000> | distances <full> <half> <half-return> <low>\n"
-    "placement everyone|admins|nobody | clear-objects | noclip on|off | nobail on|off | boosts on|off | tuning on|off\n"
+    "placement everyone|admins|nobody | objects <number>|off | clear-objects | noclip on|off | nobail on|off | boosts on|off | tuning on|off\n"
     "tpall [player] | tphere <player> | votes [map|kick|tod on|off|<percent>] | vote-cancel\n"
+    "map-pool [add|remove <map>|clear] | rotation [<minutes>|off]\n"
     "park <lot> <layout> | layer-sync on|off | layer <key> default|on|off | tod <time|default>\n"
     "activity-log on|off | announce-throwdowns on|off | parties [on|off] | party-size <2-8> | speed-check off|warn|kick\n"
     "score-check [off|warn|kick] | score-allow [<fingerprint>|remove <fingerprint>]\n"
     "admin add|remove <SteamID64> | admins | update | quit";
-// A command as the log shows it: the log is plain text, so a new password is left out.
-std::string loggable(std::string_view command) {
-    const auto [verb, argument] = split(command);
-    if (lower(verb) != "password" || argument.empty() || argument == "off") return std::string(command);
-    return std::string(verb) + " <hidden>";
-}
 } // namespace
 
 Host::Host(ServerConfig &config, SteamTransport &transport, Log log)
@@ -91,6 +87,31 @@ Packet Host::packet(PacketKind kind, std::uint64_t now) {
 std::string Host::guest_name(const Guest &g) const {
     return g.member.name.empty() ? std::to_string(g.member.id) : g.member.name;
 }
+// The name a joining player is known by here. It is the one their game sent, which the
+// server cannot check against Steam, so it is made safe to show and to type: never blank,
+// never the server's or ReSkate's own, never read as a SteamID64 by kick or ban (which take
+// a number as one), and never the same as another player's.
+std::string Host::player_name(std::string_view wanted, std::uint64_t id) const {
+    const auto fallback = "Player " + std::to_string(id % 10000);
+    std::string name(trim(wanted));
+    cut_text(name, max_member_name);
+    // Names show in every player's roster, nametags and party UI.
+    if (text::contains_bad_words(name)) name = text::mask_bad_words(name);
+    const auto folded = lower(name);
+    const auto first = split(name).first;
+    const bool digits = !first.empty() && std::all_of(first.begin(), first.end(), [](char c) { return c >= '0' && c <= '9'; });
+    if (name.empty() || folded == "server" || folded == "reskate" || folded == lower(config_.name)) name = fallback;
+    else if (digits) name = "Player " + name;
+    const auto taken = [&](const std::string &candidate) {
+        return std::any_of(guests_.begin(), guests_.end(), [&](const auto &entry) {
+            return entry.first != id && entry.second->handshaken && lower(entry.second->member.name) == lower(candidate);
+        });
+    };
+    auto unique = name;
+    for (unsigned copy = 2; taken(unique) && copy < 1000; ++copy) unique = name + " (" + std::to_string(copy) + ")";
+    cut_text(unique, 128);
+    return unique;
+}
 bool Host::is_admin(std::uint64_t id) const {
     return std::find(config_.admins.begin(), config_.admins.end(), id) != config_.admins.end();
 }
@@ -106,6 +127,11 @@ void Host::save() {
 }
 std::string Host::invite() const { return format_invite({id_, secret_}); }
 std::string Host::map_name() const { return map_label(config_.map); }
+std::string Host::wire_map_label() const { // players without the map's mod still see its name
+    auto label = map_name();
+    cut_text(label, max_member_name);
+    return valid_map_label(label) ? label : std::string{};
+}
 unsigned Host::players() const {
     return static_cast<unsigned>(std::count_if(guests_.begin(), guests_.end(), [](const auto &g) { return g.second->handshaken; }));
 }
@@ -150,6 +176,9 @@ void Host::apply_layers() {
 bool Host::send_packet(Guest &g, const Packet &p, bool reliable, bool fresh, std::span<const std::uint8_t> raw,
                        std::span<const std::uint8_t> wire) {
     auto update = raw.empty() ? g.sender.prepare(p) : g.sender.prepare(p, raw, wire);
+    // A packet that cannot be built for anyone is its source's fault, never this recipient's:
+    // nothing is sent, and the recipient is not treated as unreachable.
+    if (update.bytes.empty()) return true;
     // A stream and its reliable delta references must always use the same lane.
     if (!transport_.send(g.member.id, update.bytes, reliable || update.establishes_baseline(), fresh, traffic_lane(p.kind)))
         return false;
@@ -232,6 +261,7 @@ void Host::send_roster() {
     p.voice_range = config_.voice_range;
     p.distances = config_.distances;
     p.object_placement = config_.object_placement;
+    p.object_limit = config_.object_limit;
     p.guest_noclip = config_.noclip;
     p.guest_no_bail = config_.no_bail;
     p.guest_boosts = config_.boosts;
@@ -273,6 +303,7 @@ void Host::send_roster() {
 void Host::send_world_state() {
     auto state = packet(PacketKind::world_state, now_);
     state.destination = map_destination(config_.map);
+    state.map_label = wire_map_label();
     state.world_ready = true; // the server has nothing to load
     const auto bytes = encode_wire(state);
     for (auto &[id, guest] : guests_)
@@ -299,14 +330,27 @@ void Host::send_bans(Guest &admin) {
     }
     if (send_packet(admin, list, true, false)) admin.bans_sent = bans_revision_;
 }
-// The maps an admin may switch to: the retail ones and the server's custom maps.
-void Host::send_maps(Guest &admin) {
+void Host::send_maps(Guest &guest) { // admins: every map and the pool; players: the pool
     auto list = packet(PacketKind::maps, now_);
-    for (const auto &level : levels())
+    const auto add = [&](const ServerLevel &level) {
         if (valid_map_asset(level.asset) && list.maps.size() < max_server_maps) list.maps.push_back(level.asset);
-    if (send_packet(admin, list, true, false)) admin.maps_sent = true;
+    };
+    if (is_admin(guest.member.id)) {
+        for (const auto &level : levels()) add(level);
+        if (!config_.map_pool.empty())
+            for (const auto *level : pool_levels(config_)) {
+                const auto at = std::find(list.maps.begin(), list.maps.end(), level->asset);
+                if (at != list.maps.end()) list.map_pool.push_back(static_cast<std::uint16_t>(at - list.maps.begin()));
+            }
+    } else {
+        for (const auto *level : pool_levels(config_)) add(*level);
+    }
+    list.map_rotation = static_cast<std::uint16_t>(std::min(config_.map_rotation, max_map_rotation));
+    if (send_packet(guest, list, true, false)) guest.maps_sent = true;
 }
 void Host::change_map(std::string_view map) {
+    if (!valid_map_destination(map_destination(map_setting(map))))
+        throw std::invalid_argument("That map does not name a destination.");
     // Everything tied to the old world goes; admission and player slots stay.
     for (auto &[id, guest] : guests_) {
         auto &g = *guest;
@@ -336,6 +380,8 @@ void Host::change_map(std::string_view map) {
     activity_.clear(); // throwdowns end with the world
     config_.map = map_setting(map);
     map_ = map_hash(map_destination(config_.map));
+    map_since_ = now_;
+    rotation_warned_ = false;
     travel_started_ = now_;
     last_world_state_ = 0;
     send_world_state();
@@ -350,10 +396,17 @@ void Host::drop(std::uint64_t id, const std::string &reason) {
         roster_dirty_ = true;
         log_(name + " left (" + reason + ")");
         activity_.left(id);
+    } else {
+        // Never admitted: it held a player slot meanwhile, so it shows in the log, and an ID
+        // that keeps failing waits longer each time before its connection is taken again.
+        const auto failures = join_backoff_.failed(id, now_);
+        log_("[join] " + std::to_string(id) + " did not finish joining (" + reason + ")" +
+             (failures > 1 ? ", attempt " + std::to_string(failures) : std::string{}));
     }
     guests_.erase(found);
     party_left(id, name);
-    vote_cooldowns_.erase(id);
+    // Their vote cooldown stays (tick() drops it once it has run out): leaving and coming
+    // back does not let a player start another vote sooner.
     // One voter fewer, or the player a kick vote was about. Counted in tick(): a passing kick
     // vote drops another player, which must not happen inside a caller's walk over guests_.
     vote_recount_ = true;
@@ -363,10 +416,10 @@ void Host::drop(std::uint64_t id, const std::string &reason) {
 bool Host::accept_data(Guest &source, const Packet &p) {
     bool accepted{};
     if (p.kind == PacketKind::cosmetics) {
-        accepted = source.appearance.push(p);
+        accepted = source.outfit_budget.accept(now_) && source.appearance.push(p);
         if (accepted) source.cosmetic_packet = encode_wire(p);
     } else if (p.kind == PacketKind::audio)
-        accepted = source.audio.push(p, now_);
+        accepted = source.sound_budget.accept(now_, p.audio.size()) && source.audio.push(p, now_);
     else if (p.kind == PacketKind::pose)
         accepted = source.poses.push_validated(p, now_);
     // The server never plays anything back: keep only what ordering needs.
@@ -383,10 +436,12 @@ bool Host::accept_data(Guest &source, const Packet &p) {
     }
     return true;
 }
-void Host::receive(std::uint64_t peer, std::span<const std::uint8_t> bytes) {
+void Host::receive(std::uint64_t peer, std::span<const std::uint8_t> bytes, std::uint64_t received_at) {
     auto *link = find(peer);
     if (!link) return;
-    if (!link->budget.accept(now_, bytes.size(), 1U)) return drop(peer, "Peer exceeded the multiplayer packet limit.");
+    // Counted by arrival: after the server was held up, everyone's packets are read at once.
+    if (!link->budget.accept(received_at ? received_at : now_, bytes.size(), 1U))
+        return drop(peer, "Peer exceeded the multiplayer packet limit.");
     bool missing_reference{};
     const auto decoded = link->receiver.receive(bytes, missing_reference, world_);
     if (missing_reference) return;
@@ -444,6 +499,7 @@ void Host::receive(std::uint64_t peer, std::span<const std::uint8_t> bytes) {
         if (newly_authorized || !link->last_map_offer || now_ - link->last_map_offer >= 1000000) {
             auto offer = packet(PacketKind::map_offer, now_);
             offer.destination = map_destination(config_.map);
+            offer.map_label = wire_map_label();
             offer.challenge = link->password_challenge;
             offer.map_authorized = authorized;
             send_required(*link, encode_wire(offer));
@@ -482,10 +538,8 @@ void Host::receive(std::uint64_t peer, std::span<const std::uint8_t> bytes) {
         const bool joined = !link->handshaken;
         link->member.epoch = p.epoch;
         if (joined) {
-            link->member.name = p.text.empty() ? "Player " + std::to_string(peer % 10000) : p.text;
-            if (link->member.name.size() > 128) link->member.name.resize(128);
-            // Names show in every player's roster, nametags and party UI.
-            if (text::contains_bad_words(link->member.name)) link->member.name = text::mask_bad_words(link->member.name);
+            link->member.name = player_name(p.text, peer);
+            join_backoff_.joined(peer);
         }
         link->handshaken = true;
         link->world_ready = true;
@@ -537,7 +591,8 @@ void Host::receive(std::uint64_t peer, std::span<const std::uint8_t> bytes) {
     }
     if (p.kind == PacketKind::roster) return drop(peer, "Only the server may publish the player roster.");
     if (p.kind == PacketKind::teleport) return drop(peer, "Only the server may teleport players.");
-    if (p.kind == PacketKind::physics_tuning) return; // a listen host's; the server's is the game's own
+    // A listen host's; the server's physics are the game's own.
+    if (p.kind == PacketKind::physics_tuning || p.kind == PacketKind::physics_extras) return;
     if (p.kind == PacketKind::chat) {
         if (!routed_source(p, link->member, peer, true, id_) ||
             link->chat_rate.accept(now_, p.text, 1) != ChatRate::Verdict::accepted)
@@ -644,6 +699,8 @@ void Host::sync_objects() {
              (config_.object_placement == ObjectPlacement::host_only && is_admin(id)))) {
             auto layout = guest->objects.layout();
             std::erase_if(layout, [&](const auto &object) { return guest->cleared.contains(object.id); });
+            // No more of a player's objects than the server allows each of them; admins are not limited.
+            if (!is_admin(id)) layout = limited_layout(std::move(layout), guest->shared.objects(), config_.object_limit);
             if (config_.activity_log) activity_.objects(id, guest->shared.layout(), layout);
             guest->shared.replace(layout);
             guest->shared_from = guest->objects.revision();
@@ -716,7 +773,16 @@ void Host::tick(std::uint64_t now) {
             transport_.disconnect(link.id, "You are banned from this server.");
             continue;
         }
+        // The backend's list (global_bans.h), which can reach a player who is already on.
+        if (config_.global_bans && multiplayer::reskate_banned(link.id)) {
+            transport_.disconnect(link.id, multiplayer::banned_notice.data());
+            continue;
+        }
         auto *guest = find(link.id);
+        if (!guest && join_backoff_.waiting(link.id, now_)) {
+            transport_.disconnect(link.id, "Too many failed attempts to join. Wait a little and try again.");
+            continue;
+        }
         if (!guest) {
             if (!individual_steam_id(link.id) || guests_.size() >= config_.max_players) {
                 transport_.disconnect(link.id, "The server is full.");
@@ -730,7 +796,7 @@ void Host::tick(std::uint64_t now) {
         }
         if (link.connected && !guest->connected_at) guest->connected_at = now_;
     }
-    for (const auto &message : transport_.receive()) receive(message.peer, message.bytes);
+    for (const auto &message : transport_.receive()) receive(message.peer, message.bytes, message.arrived);
     receive_cosmetics();
     for (auto it = guests_.begin(); it != guests_.end();) {
         auto &g = *(it++)->second;
@@ -765,6 +831,9 @@ void Host::tick(std::uint64_t now) {
     activity_.tick(now_);
     if (std::exchange(vote_recount_, false)) check_vote(false);
     if (vote_ && now_ >= vote_->ends) check_vote(true);
+    tick_rotation();
+    std::erase_if(vote_cooldowns_, [&](const auto &entry) { return now_ >= entry.second; });
+    join_backoff_.prune(now_);
 }
 
 // ---- Commands --------------------------------------------------------------------------------
@@ -774,6 +843,7 @@ std::string Host::command(std::string_view line, std::uint64_t admin) {
     const auto verb = lower(action);
     // The in-game menu's names for the same settings.
     const std::string name = verb == "voice-allow" ? "voice" : verb == "object-placement" ? "placement"
+                           : verb == "object-limit" ? "objects"
                            : verb == "world-layer-sync" ? "layer-sync" : verb == "noclip-allow" ? "noclip"
                            : verb == "nobail-allow" ? "nobail" : verb == "boosts-allow" ? "boosts"
                            : verb == "tuning-enforce" ? "tuning" : verb;
@@ -819,6 +889,41 @@ std::string Host::command(std::string_view line, std::uint64_t admin) {
         send_chat(argument);
         return "[chat] Server: " + clean_chat_text(argument);
     }
+    if (name == "msg" || name == "msg-party" || name == "msg-admins") {
+        // Direct messages from the console or an admin, marked "[DM from ...]" so nobody takes them for chat.
+        const auto *sender = console ? nullptr : find(admin);
+        const std::string from = sender ? guest_name(*sender) : "Server";
+        const bool to_admins = name == "msg-admins";
+        const auto [who, text] = to_admins ? std::pair<std::string_view, std::string_view>{{}, trim(argument)} : split(argument);
+        if (text.empty()) return to_admins ? "msg-admins <text>" : name + " <player> <text>";
+        std::vector<Guest *> recipients;
+        std::string scope, label;
+        if (to_admins) {
+            scope = label = "admins";
+            for (auto &[id, guest] : guests_)
+                if (guest->handshaken && is_admin(id)) recipients.push_back(guest.get());
+        } else {
+            auto *guest = match_player(who);
+            if (!guest) return "No single connected player matches \"" + std::string(who) + "\".";
+            label = guest_name(*guest);
+            if (name == "msg") {
+                recipients.push_back(guest);
+            } else {
+                const auto *details = parties_.party(parties_.party_of(guest->member.id));
+                if (!details) return label + " is not in a party.";
+                scope = "party";
+                label += "'s party";
+                for (const auto member : details->members)
+                    if (auto *found = find(member); found && found->handshaken) recipients.push_back(found);
+            }
+        }
+        if (recipients.empty()) return "No admins are online.";
+        const auto message = dm_line(from, scope, text, multiplayer_chat_max_bytes);
+        for (auto *guest : recipients) send_chat(message, guest);
+        const auto done = "Sent to " + label + (recipients.size() > 1 || to_admins ? " (" + std::to_string(recipients.size()) + " players)" : "") + ".";
+        if (!console) log_("[dm] " + from + " -> " + label + ": " + clean_chat_text(text));
+        return done;
+    }
     if (name == "kick") {
         auto *guest = target(argument);
         if (!guest || !guest->handshaken) return "No single connected player matches \"" + std::string(argument) + "\".";
@@ -838,7 +943,7 @@ std::string Host::command(std::string_view line, std::uint64_t admin) {
         if (!console && is_admin(id)) return "Admins cannot ban other admins.";
         if (is_banned(id)) return std::to_string(id) + " is already banned.";
         auto label = guest ? guest->member.name : clean_chat_text(reason);
-        if (label.size() > 64) label.resize(64);
+        cut_text(label, 64);
         config_.bans.push_back({id, label, static_cast<std::int64_t>(std::time(nullptr))});
         if (guest) drop(id, "You were banned from this server.");
         return changed((label.empty() ? std::to_string(id) : label) + " was banned.");
@@ -858,7 +963,10 @@ std::string Host::command(std::string_view line, std::uint64_t admin) {
         return text;
     }
     if (name == "map") {
-        if (argument.empty() || !valid_map_destination(map_destination(argument)))
+        // The map as it will be stored must still name a destination: one that does not would
+        // leave the server unable to tell players where to go, and unable to start again.
+        if (argument.empty() || !valid_map_destination(map_destination(argument)) ||
+            !valid_map_destination(map_destination(map_setting(argument))))
             return "No single map is called \"" + std::string(argument) + "\". Type maps for the list.";
         if (map_hash(map_destination(argument)) == map_) return "The server is already on that map.";
         change_map(argument);
@@ -867,11 +975,53 @@ std::string Host::command(std::string_view line, std::uint64_t admin) {
     }
     if (name == "maps") {
         std::string text = std::to_string(levels().size()) + " maps (custom maps come from Mods next to the server)";
-        for (const auto &level : levels()) text += "\n  " + level.name + (same_map(level.asset) ? "  (now)" : "");
+        for (const auto &level : levels())
+            text += "\n  " + level.name + (same_map(level.asset) ? "  (now)" : "") +
+                    (!config_.map_pool.empty() && in_map_pool(config_, level.asset) ? "  (pool)" : "");
         return text;
     }
+    if (name == "map-pool") { // map-pool [add|remove <map>|clear]
+        const auto [what_text, map] = split(argument);
+        const auto what = lower(what_text);
+        if (what.empty()) return pool_text();
+        if (what == "clear") {
+            config_.map_pool.clear();
+            resend_maps();
+            return changed("The map pool is cleared: players vote between every map, and the rotation goes through them all.");
+        }
+        if (what != "add" && what != "remove") return "map-pool [add|remove <map>|clear]";
+        const auto *level = find_level(map);
+        if (!level || !valid_map_destination(map_destination(level->asset)))
+            return "No single map is called \"" + std::string(map) + "\". Type maps for the list.";
+        const auto pooled = [&](const std::string &entry) { return find_level(entry) == level; };
+        const bool listed = std::any_of(config_.map_pool.begin(), config_.map_pool.end(), pooled);
+        if (what == "add") {
+            if (listed || config_.map_pool.empty()) return level->name + " is already in the map pool.";
+            config_.map_pool.push_back(level->name);
+        } else {
+            if (config_.map_pool.empty()) // every map: keep all the others
+                for (const auto *other : pool_levels(config_)) config_.map_pool.push_back(other->name);
+            else if (!listed) return level->name + " is not in the map pool.";
+            if (std::all_of(config_.map_pool.begin(), config_.map_pool.end(), pooled))
+                return "The map pool needs at least one map. map-pool clear allows every map again.";
+            std::erase_if(config_.map_pool, pooled);
+        }
+        resend_maps();
+        return changed(level->name + (what == "add" ? " added to" : " removed from") + " the map pool.");
+    }
+    if (name == "rotation") { // rotation [<minutes>|off]
+        if (argument.empty()) return rotation_text();
+        const auto value = lower(argument);
+        const auto minutes = value == "off" ? std::optional<std::uint64_t>(0) : number(value);
+        if (!minutes || *minutes > max_map_rotation) return "rotation <1-1440 minutes>|off";
+        config_.map_rotation = static_cast<unsigned>(*minutes);
+        map_since_ = now_;
+        rotation_warned_ = false;
+        resend_maps();
+        return changed(rotation_text());
+    }
     if (name == "name") {
-        if (argument.empty() || argument.size() > 64 || !valid_member_name(argument)) return "Server names are 1 to 64 characters.";
+        if (!valid_server_name(argument)) return std::string("Server names are ") + server_name_rule + ".";
         config_.name = argument;
         if (text::contains_bad_words(config_.name))
             return changed("Server renamed to " + config_.name +
@@ -1043,6 +1193,14 @@ std::string Host::command(std::string_view line, std::uint64_t admin) {
         return changed(*policy == ObjectPlacement::everyone ? "Everyone can place objects."
                        : *policy == ObjectPlacement::host_only ? "Only admins can place objects. Everyone else's are frozen."
                                                                : "Object placement is off. Existing objects stay.");
+    }
+    if (name == "objects") {
+        const auto limit = parse_object_limit(argument);
+        if (!limit) return "objects <1-" + std::to_string(max_object_limit) + ">|off";
+        config_.object_limit = *limit;
+        for (auto &[id, guest] : guests_) guest->shared_from = 0; // look at every layout again
+        return changed(*limit ? "Each player can place up to " + std::to_string(*limit) + " objects. Admins are not limited."
+                              : std::string("Players can place as many objects as they like."));
     }
     if (name == "votes") {
         // votes | votes <map|kick|tod> on|off|<percent> | votes seconds|cooldown <n>
@@ -1245,10 +1403,12 @@ std::string Host::command(std::string_view line, std::uint64_t admin) {
         if (!individual_steam_id(id)) return "admin add|remove <player or SteamID64>";
         if (sub == "add") {
             if (!is_admin(id)) config_.admins.push_back(id);
+            resend_maps();
             return changed(std::to_string(id) + " is an admin.");
         }
         if (sub == "remove") {
             std::erase(config_.admins, id);
+            resend_maps();
             return changed(std::to_string(id) + " is no longer an admin.");
         }
         return "admin add|remove <player or SteamID64>";

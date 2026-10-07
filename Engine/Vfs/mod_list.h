@@ -12,7 +12,9 @@
 // happens here, so the launcher's mod manager and the runtime share it.
 namespace dingosdk::mods {
 
-inline constexpr std::size_t maximum_mods = 64;
+// There is no limit on how many mods are listed or loaded: nothing in the merge needs one
+// (archives are numbered with 16 bits). There was one of 64 once, which players reached: past
+// it the launcher could not save the list at all, and the game skipped the later mods.
 inline constexpr std::size_t maximum_mod_name = 64;
 // Generated state the SDK owns. Folders beginning with a dot are never mods.
 inline constexpr char generated_folder[] = ".reskate";

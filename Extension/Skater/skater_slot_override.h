@@ -42,10 +42,12 @@ bool initialize_skater_slot_override(
 
 // Call from one game update thread. Once enabled, tick reapplies the reversible
 // settings leases and asks the game's own loadout manager to restore ten slots
-// if an inventory/profile response reduces the process-local count.
+// if an inventory/profile response reduces the process-local count. The first
+// selection after a level load restores `initial_preset`, once
+// `outfits_loadable` says the slots it builds can take their saved outfits.
 SkaterSlotOverrideObservation update_skater_slot_override(
     SkaterSlotOverrideAction action = SkaterSlotOverrideAction::tick,
-    std::uint32_t initial_preset = 0) noexcept;
+    std::uint32_t initial_preset = 0, bool outfits_loadable = true) noexcept;
 
 SkaterSlotOverrideObservation skater_slot_override_observation();
 }

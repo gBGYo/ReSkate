@@ -26,6 +26,8 @@ void publish_guest_objects(Session &s) {
         if (peer.handshaken && peer.objects.revision() != peer.shared_from) {
             auto layout = peer.objects.layout();
             std::erase_if(layout, [&](const auto &object) { return peer.cleared.contains(object.id); });
+            // The host's limit on each guest's objects, which a patched client cannot place past.
+            layout = limited_layout(std::move(layout), peer.shared.objects(), s.object_limit);
             peer.shared.replace(layout);
             peer.shared_from = peer.objects.revision();
         }
@@ -120,6 +122,13 @@ void disconnect(Session &s, std::uint64_t id, const std::string &reason) {
     for (std::size_t i = 0; i < s.used_slots; ++i)
         if (s.peers[i].member.id == id) {
             s.roster_dirty |= s.peers[i].handshaken;
+            // Never admitted: it held a player slot meanwhile. An ID that keeps failing waits
+            // longer each time before its connection is taken again.
+            if (s.mode == Mode::host && !s.peers[i].handshaken) {
+                const auto failures = s.join_backoff.failed(id, s.network_now);
+                logging::log(logging::Level::info, logging::Channel::runtime,
+                             "Multiplayer: {} did not finish joining ({}), attempt {}.", id, reason, failures);
+            }
             reset_peer(s, i);
             break;
         }
@@ -131,6 +140,10 @@ bool send_packet(Session &s, std::uint64_t id, const Packet &p, bool reliable, b
     if (!peer)
         return false;
     auto update = raw.empty() ? peer->sender.prepare(p) : peer->sender.prepare(p, raw, wire);
+    // A packet that cannot be built for anyone is its source's fault, never this recipient's:
+    // nothing is sent, and the recipient is not treated as unreachable.
+    if (update.bytes.empty())
+        return true;
     // A stream and its reliable delta references must always use the same lane.
     if (!s.transport.send(id, update.bytes, reliable || update.establishes_baseline(), fresh, traffic_lane(p.kind)))
         return false;
@@ -183,6 +196,14 @@ std::string send_chat(Session &s, std::string_view typed) {
     message.text = text;
     broadcast(s, message, true, false, now);
     const auto local = s.transport.status().local_id;
+    // The host passes a guest's line on, and could pass on anything under anyone's name. So a
+    // guest whose line shows a badge of the backend's also sends it straight to every player
+    // Steam connects them to: the copy is not shown, it is what lets that player know the
+    // host's one is ours (chat proofs, session_receive.cpp). Older builds ignore it.
+    if (s.mode == Mode::join && own_tag_shown() && identity_mark(local))
+        for (const auto &peer : active_peers(s))
+            if (peer.handshaken && peer.direct_ready && peer.member.id != s.host_id)
+                send_packet(s, peer.member.id, message, true, false);
     add_chat(s, local, s.transport.name(local), std::move(text), true);
     return {};
 }
@@ -205,6 +226,29 @@ std::string send_chat_command(Session &s, std::string_view typed) {
         const auto local = s.transport.status().local_id;
         add_chat(s, local, s.transport.name(local), "[Party] " + std::string(sent.substr(3)), true);
     }
+    return {};
+}
+std::string send_party_chat(Session &s, std::string_view typed) {
+    if (s.mode != Mode::host && s.mode != Mode::join) return "Chat needs a multiplayer session.";
+    if (!s.local_party) return "You're not in a party.";
+    const auto text = clean_chat_text(typed);
+    if (text.empty()) return "Type a message first.";
+    const auto now = now_us();
+    switch (s.local_chat_rate.accept(now, text)) {
+    case ChatRate::Verdict::repeated: return "You just said that.";
+    case ChatRate::Verdict::too_fast: return "Slow down: one message every couple of seconds.";
+    case ChatRate::Verdict::accepted: break;
+    }
+    const auto local = s.transport.status().local_id;
+    if (s.mode == Mode::host) {
+        host_party_chat(s, local, text, now);
+    } else {
+        // The host relays it to the rest of the party, not back to us.
+        auto message = packet(s, PacketKind::chat, now);
+        message.text = clean_chat_text("/p " + text);
+        if (!send_packet(s, s.host_id, message, true, false)) return "Could not reach the host.";
+    }
+    add_chat(s, local, s.transport.name(local), "[Party] " + text, true);
     return {};
 }
 void send_throwdown(Session &s, std::vector<std::uint8_t> message) {
@@ -311,8 +355,11 @@ void broadcast(Session &s, const Packet &packet, bool reliable, bool fresh, std:
             data.wire = encode_wire_bytes(data.raw);
             data.ready = true;
         }
-        outgoing.push_back({&p, p.sender.prepare(packet, data.raw, data.wire, data.deltas), delivery,
-                            interval});
+        auto update = p.sender.prepare(packet, data.raw, data.wire, data.deltas);
+        // Unbuildable for anyone (see send_packet): skipped, and no recipient is dropped for it.
+        if (update.bytes.empty())
+            continue;
+        outgoing.push_back({&p, std::move(update), delivery, interval});
     }
     if (outgoing.empty())
         return;
@@ -384,6 +431,7 @@ void send_roster(Session &s, std::uint64_t now) {
     p.voice_range = s.voice_range;
     p.distances = s.distances;
     p.object_placement = s.object_placement;
+    p.object_limit = s.object_limit;
     p.guest_noclip = s.guest_noclip;
     p.guest_no_bail = s.guest_no_bail;
     p.guest_boosts = s.guest_boosts;
@@ -396,25 +444,28 @@ void send_roster(Session &s, std::uint64_t now) {
     p.parks = s.parks;
     p.capacity = s.capacity;
     // Names come from the transport's short-lived name cache, not a Steam call per player.
-    p.members.push_back({p.source, s.epoch, s.transport.name(p.source)});
+    // Steam names are cleaned to what a roster may carry: one that is not would be refused
+    // by every guest, and by this host's own encoder.
+    p.members.push_back({p.source, s.epoch, clean_roster_name(s.transport.name(p.source))});
     p.members.back().scoring = s.local_scoring;
     for (auto &peer : active_peers(s))
         if (peer.handshaken) {
-            peer.member.name = s.transport.name(peer.member.id);
+            peer.member.name = clean_roster_name(s.transport.name(peer.member.id));
             p.members.push_back(peer.member);
         }
-    // A lobby is one party: everyone in it, led by the host (a party needs two players).
-    for (auto &m : p.members) {
-        m.party = p.members.size() > 1 ? lobby_party : 0;
-        m.party_leader = m.party && m.id == p.source;
-        m.party_open = false;
-    }
+    // Parties are the ones the lobby's players formed (session_party.cpp), as on a dedicated
+    // server. The host's own copy of each player follows the roster it sends.
+    fill_roster_parties(s, p.members);
     for (auto &peer : active_peers(s))
-        if (peer.handshaken) {
-            peer.member.party = p.members.front().party;
-            peer.member.party_leader = false;
-        }
-    if (p.members.front().party != s.local_party) ++s.party_revision;
+        if (peer.handshaken)
+            for (const auto &m : p.members)
+                if (m.id == peer.member.id) {
+                    if (peer.member.party != m.party || peer.member.party_leader != m.party_leader ||
+                        peer.member.party_open != m.party_open) ++s.party_revision;
+                    peer.member.party = m.party;
+                    peer.member.party_leader = m.party_leader;
+                    peer.member.party_open = m.party_open;
+                }
     set_local_party(s, p.members.front());
     broadcast(s, p, true, false, now);
     s.roster_dirty = false;
@@ -422,12 +473,37 @@ void send_roster(Session &s, std::uint64_t now) {
     publish_chat(s); // the host's "/" argument lists (players) follow its own roster
 }
 void update_physics_tuning(Session &s, const NativeFrame &local, std::uint64_t now) {
+    // A guest whose host sets everyone's physics: the player's own edits stand down from the
+    // moment of joining (the roster says otherwise, if it does) and through travel, and what
+    // the host shares beyond its tuning is theirs. A dedicated server shares the game's own.
+    const bool enforced = s.mode == Mode::join && s.enforce_tuning;
+    set_session_tuning_enforced(enforced);
+    if (enforced && s.host_extras && !dedicated_host(s)) set_host_physics_extras(*s.host_extras);
+    else set_host_physics_extras({});
     if (s.mode == Mode::host) {
         physics_tuning::release(s.base);
         if (!s.enforce_tuning) {
             s.sent_tuning.reset();
             s.tuning_packet.clear();
+            s.sent_extras = 0;
+            s.extras_packet.clear();
             return;
+        }
+        // The host's physics beyond its tuning: small, so a look four times a second, and sent
+        // whenever they change (the first time even when they are the game's own, so a guest
+        // never keeps what an earlier spell of enforcement left it).
+        if (now >= s.next_extras_check) {
+            s.next_extras_check = now + 250000;
+            std::vector<std::uint8_t> extras;
+            if (local_physics_extras(s.sent_extras, extras)) {
+                if (extras.size() > max_physics_extras) extras.clear();
+                logging::log(logging::Level::info, logging::Channel::runtime,
+                             "Multiplayer: sending your other physics changes to guests ({} bytes).", extras.size());
+                auto p = packet(s, PacketKind::physics_extras, now);
+                p.extras = std::move(extras);
+                s.extras_packet = encode_wire(p);
+                broadcast(s, p, true, false, now);
+            }
         }
         // Edits to the tuning are rare: a look every 5 s (a 17 KB copy) is enough.
         if (now < s.next_tuning_check) return;
@@ -530,7 +606,14 @@ void send_local(Session &s, const NativeFrame &local, std::uint64_t now, std::ui
     };
     if (now - s.last_cosmetic_capture >= 500000) {
         s.last_cosmetic_capture = now;
-        const auto appearance = capture_cosmetics(s.base, local, s.cosmetic_capture_status);
+        auto appearance = capture_cosmetics(s.base, local, s.cosmetic_capture_status);
+        // The player's choices to go without their tag or their animated items travel with their
+        // outfit, so a change is sent like one and reaches players who join later.
+        if (appearance) {
+            appearance->hide_tag = !own_tag_shown();
+            appearance->hide_items = !own_items_shown();
+            appearance->marks = developer_hoodie_detail::own_styles.load();
+        }
         if (appearance && (!s.sent_appearance || *appearance != *s.sent_appearance)) {
             auto p = packet(s, PacketKind::cosmetics, now);
             p.appearance = *appearance;
