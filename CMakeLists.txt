@@ -289,6 +289,18 @@ if(DINGOSDK_BUILD_HALL_OF_MEAT_TESTS)
     target_link_libraries(dingosdk_hall_of_meat_skeleton_tests PRIVATE dingosdk_game_archives dingosdk_logging)
     add_test(NAME hall_of_meat_skeleton COMMAND dingosdk_hall_of_meat_skeleton_tests "${DINGOSDK_TEST_GAME_ROOT}")
 endif()
+option(DINGOSDK_BUILD_BLOOD_TESTS "Build standalone blood regression tests and asset tools" OFF)
+if(DINGOSDK_BUILD_BLOOD_TESTS)
+    enable_testing()
+    add_executable(dingosdk_blood_tests Extension/Blood/Test/blood_tests.cpp
+        Extension/Blood/blood.cpp Extension/Blood/blood_pool.cpp Extension/Blood/blood_ground.cpp
+        Extension/Blood/impact_model.cpp Extension/Blood/blood_options.cpp)
+    target_link_libraries(dingosdk_blood_tests PRIVATE dingosdk_json)
+    add_test(NAME blood COMMAND dingosdk_blood_tests)
+    add_executable(dingosdk_blood_asset_author EXCLUDE_FROM_ALL Extension/Blood/Tools/blood_asset_author.cpp)
+    target_link_libraries(dingosdk_blood_asset_author PRIVATE dingosdk_game_archives dingosdk_json dingosdk_mods)
+endif()
+
 get_property(project_targets DIRECTORY PROPERTY BUILDSYSTEM_TARGETS)
 foreach(target IN LISTS project_targets)
     if(NOT target MATCHES "^(dingosdk_imgui|dingosdk_detours|dingosdk_sqlite|dingosdk_lz4|dingosdk_zstd|dingosdk_miniz)$")

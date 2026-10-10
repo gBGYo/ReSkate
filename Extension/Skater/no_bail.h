@@ -2,6 +2,16 @@
 #include <cstdint>
 
 namespace dingosdk {
+// Read-only local ownership for features sharing the existing bail hooks.
+// Resolves the player binding afresh, including teleports and rig back-links.
+struct LocalBailOwner {
+    std::uintptr_t base{}, entity{}, world{}, core{}, context{}, rig{}, selector{};
+    bool operator==(const LocalBailOwner&) const = default;
+};
+bool resolve_local_bail_owner(std::uintptr_t client, std::uintptr_t entity, LocalBailOwner& result) noexcept;
+// Walking recovery is a verified ground/slide substate of the owned Offboard
+// parent, with no outstanding native wipeout animation request.
+bool local_bail_recovered(const LocalBailOwner& owner) noexcept;
 bool start_no_bail(std::uintptr_t image_base) noexcept;
 bool no_bail_available() noexcept;
 // Publish from the validated local client tick. Returns owner availability even

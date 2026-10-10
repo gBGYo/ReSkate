@@ -16,6 +16,7 @@
 #include "Engine/Resource/toc.h"
 #include "Engine/Vfs/mod_catalog.h"
 #include "Engine/Vfs/native_db.h"
+#include "Engine/Vfs/game_archives.h"
 
 #include <Windows.h>
 
@@ -158,8 +159,10 @@ fb::Sha1 sha(const std::string& name, unsigned version) {
 
 struct Ebx { std::string name; unsigned version; Bytes payload; };
 struct Resource { std::string name; Bytes payload; };
+struct PixelChunk { fb::Guid id; Bytes payload; };
 
-fb::BinaryBundle manifest_of(const std::vector<Ebx>& assets, const std::vector<Resource>& resources) {
+fb::BinaryBundle manifest_of(const std::vector<Ebx>& assets, const std::vector<Resource>& resources,
+    const std::vector<PixelChunk>& chunks = {}) {
     fb::BinaryBundle manifest;
     for (const auto& asset : assets) {
         fb::BundleAsset entry;
@@ -180,6 +183,16 @@ fb::BinaryBundle manifest_of(const std::vector<Ebx>& assets, const std::vector<R
         entry.originalSize = resource.payload.size();
         manifest.resources.push_back(std::move(entry));
     }
+    db::Node metadata; metadata.type=1; metadata.named=true; metadata.name="chunkMeta";
+    for (const auto& chunk:chunks) {
+        fb::BundleAsset entry; entry.kind=fb::AssetKind::chunk; entry.guid=chunk.id;
+        entry.sha1=sha(chunk.id.string(),0); entry.originalSize=chunk.payload.size(); entry.logicalSize=static_cast<std::uint32_t>(chunk.payload.size()); manifest.chunks.push_back(entry);
+        db::Node hash; hash.type=9; hash.named=true; hash.name="h64"; hash.owned={1,2,3,4,5,6,7,8};
+        db::Node mip; mip.type=8; mip.named=true; mip.name="firstMip"; mip.owned={0,0,0,0};
+        db::Node meta; meta.type=2; meta.named=true; meta.name="meta"; meta.children.push_back(mip);
+        db::Node row; row.type=2; row.children={hash,meta}; metadata.children.push_back(row);
+    }
+    if (!chunks.empty()) { const auto raw=db::write(metadata); manifest.chunkMetadata.assign(reinterpret_cast<const std::byte*>(raw.data()),reinterpret_cast<const std::byte*>(raw.data()+raw.size())); }
     return manifest;
 }
 
@@ -226,8 +239,9 @@ struct Fixture {
 
     // A mod with its own copy of a bundle: the manifest first (raw), then every payload.
     void add(const std::string& name, bool levels, const std::string& toc, const std::vector<std::string>& superbundles,
-             const std::vector<Ebx>& assets, const std::vector<Resource>& resources = {}, const char* bundle = bundle_name) {
-        const auto listing = fb::write_binary_bundle(manifest_of(assets, resources));
+             const std::vector<Ebx>& assets, const std::vector<Resource>& resources = {}, const char* bundle = bundle_name,
+             const std::vector<PixelChunk>& chunks = {}) {
+        const auto listing = fb::write_binary_bundle(manifest_of(assets, resources,chunks));
         Bytes archive(listing);
         std::vector<fb::BundleFileInfo> files{{{true, package, 1}, 0, static_cast<std::uint32_t>(listing.size())}};
         const auto store = [&](const Bytes& payload) {
@@ -237,10 +251,12 @@ struct Fixture {
         };
         for (const auto& asset : assets) store(asset.payload);
         for (const auto& resource : resources) store(resource.payload);
+        std::vector<fb::TocChunk> tocChunks;
+        for (const auto& chunk:chunks) {store(chunk.payload); const auto& file=files.back(); tocChunks.push_back({chunk.id,file.location,file.offset,file.size});}
         const std::vector<fb::TocBundle> bundles{{bundle, fb::write_bundle_region(files), 1}};
         const auto directory = catalog.root / name;
         write(directory / "layout.toc", layout_toc(superbundles));
-        write(directory / "Win32" / fs::path(toc), fb::write_patch_toc(bundles));
+        write(directory / "Win32" / fs::path(toc), fb::write_patch_toc(bundles,tocChunks));
         write(directory / "Win32" / "pkg" / "cas_01.cas", archive);
         mods::Mod mod;
         mod.name = name;
@@ -423,6 +439,47 @@ void carried_into_another_bundle_with_the_list(bool music_first) {
     expect(own == built, order + ": the music mod's own bundle is as it built it (" + std::to_string(own) + " files, " +
            std::to_string(built) + " built)");
 }
+// Particle graphs have compiled shader resources that no EBX import names.
+// A declared asset bundle must arrive intact in a map's replacement copy.
+void declared_particle_dependencies(bool particles_first,bool valid) {
+    Fixture fixture(std::string("declared-particles-")+(particles_first?"first":"last")+(valid?"-valid":"-invalid"));
+    const auto particles=[&] {
+        Bytes texture_header; put_guid(texture_header,guid(50));
+        fixture.add("particles",false,shared_toc,{},
+            {{"test/playlist",0,ebx_document(guid(1),{})},{"test/other",0,ebx_document(guid(2),{})},
+             {"test/blood",0,ebx_document(guid(40),{guid(41)})},{"test/blood_graph",0,ebx_document(guid(41),{})}},
+            {{"test/blood_spawn",Bytes{std::byte{0x51}}},{"test/blood_shader",Bytes{std::byte{0x52}}},
+             {"test/blood_texture",texture_header}},bundle_name,{{guid(50),Bytes{std::byte{0x61},std::byte{0x62}}}});
+        const std::string text=valid ? R"({"schema":1,"bundles":["WIN32/TEST/SHARED"]})" : R"({"schema":2,"bundles":["win32/test/shared"]})";
+        Bytes bytes; put_bytes(bytes,text); write(fixture.catalog.root/"particles"/"reskate-shared-bundles.json",bytes);
+    };
+    const auto map=[&] {fixture.add("map",true,map_toc,{map_superbundle},game_copy());};
+    if (particles_first) {particles();map();} else {map();particles();}
+    const auto report=mods::merge_mods(fixture.catalog);
+    expect(report.built && report.issue.empty(),"Declared particle merge builds\n"+describe(report));
+    expect(fixture.merged_files(map_toc)==(valid ? 9 : 3),
+        "Only valid declarations carry private EBX, compiled resources and pixel chunks into a map copy\n"+describe(report));
+    if (valid) {
+        const auto merged=fixture.catalog.root/mods::generated_folder;
+        const auto toc=fb::read_toc(read(merged/"Win32"/map_toc));
+        expect(toc.chunks.size()==1 && toc.chunks[0].guid==guid(50),"Private pixels retain native TOC lookup");
+        const auto region=fb::read_bundle_region(toc.bundles.front().region);
+        const auto layout=dingosdk::vfs::read_layout(merged/"layout.toc");
+        dingosdk::vfs::GameArchives archives(merged,layout.root);
+        const auto& file=region.files.front();
+        const auto manifest=archives.read_manifest(merged,file.location,file.offset,file.size,fixture.catalog.data_root);
+        expect(manifest.chunks.size()==1 && manifest.chunks[0].guid==guid(50),"Private pixels remain in map bundle");
+        const auto metadata=db::read({reinterpret_cast<const unsigned char*>(manifest.chunkMetadata.data()),manifest.chunkMetadata.size()},"test chunk metadata");
+        expect(metadata.children.size()==1 && metadata.children[0].field("h64") && metadata.children[0].field("meta") &&
+            metadata.children[0].field("meta")->field("firstMip"),"Private texture identity and residency metadata survive propagation");
+        const auto& pixel=region.files.back();
+        expect(fb::decode_cas(archives.read(merged,pixel.location,pixel.offset,pixel.size))==Bytes{std::byte{0x61},std::byte{0x62}},"Private pixel payload survives propagation");
+    }
+    if (!valid) {
+        bool ignored{}; for (const auto& note:report.notes) ignored|=note.find("shared bundle declaration ignored")!=std::string::npos;
+        expect(ignored,"Unsupported declaration schema is reported");
+    }
+}
 } // namespace
 
 int main() try {
@@ -436,6 +493,9 @@ int main() try {
     two_music_mods_both_carried_into_maps_copy(baseline);
     carried_into_another_bundle_with_the_list(true);
     carried_into_another_bundle_with_the_list(false);
+    declared_particle_dependencies(true,true);
+    declared_particle_dependencies(false,true);
+    declared_particle_dependencies(true,false);
     if (failures) {
         std::cerr << failures << " failure(s)\n";
         return 1;

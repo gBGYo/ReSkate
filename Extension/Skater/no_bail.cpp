@@ -1,4 +1,5 @@
 #include "no_bail.h"
+#include "Extension/Blood/blood_runtime.h"
 #include "Engine/Core/Hooks/hooks.h"
 #include "Engine/Core/Log/logging.h"
 #include "Engine/Core/Platform/memory.h"
@@ -6,6 +7,7 @@
 #include "Engine/Game/Build/addresses.h"
 #include "Engine/Game/Build/20260929/engine.h"
 #include "Engine/Game/Build/20260929/no_bail.h"
+#include "Engine/Game/Build/20260929/offboard_flight.h"
 #include <atomic>
 #include <intrin.h>
 
@@ -222,6 +224,7 @@ std::uint32_t choose_state(std::uintptr_t selector, std::uint32_t current) {
             if (chosen == wipeout_physics_state) w.wipeouts.fetch_add(1, std::memory_order_relaxed);
         }
     }
+    blood::observe_selection(selector, chosen);
     return chosen;
 }
 void skeleton_response(std::uintptr_t rig, float seconds, bool wipeout) {
@@ -233,7 +236,12 @@ void skeleton_response(std::uintptr_t rig, float seconds, bool wipeout) {
         NoBailSkater skater;
         if (published_skater(rig, skater)) observer(skater, seconds, wipeout);
     }
+    blood::PhysicsContacts contacts;
+    {LastError error; contacts=blood::capture_contacts(rig);}
+    const bool observed_wipeout=wipeout;
     protection().skeleton_original(rig, seconds, wipeout);
+    LastError error;
+    blood::observe_skeleton(rig, seconds, observed_wipeout, contacts);
 }
 bool clear_contact_output(std::uintptr_t contacts) noexcept {
     if (contacts < 0x10000 || contacts > highest - body_contact_output_offset) return false;
@@ -356,6 +364,34 @@ bool start_no_bail(std::uintptr_t base) noexcept {
     return false;
 }
 bool no_bail_available() noexcept { return protection().ready.load(std::memory_order_acquire); }
+bool resolve_local_bail_owner(std::uintptr_t client, std::uintptr_t entity, LocalBailOwner& result) noexcept {
+    LastError error;
+    Owner owner;
+    if (!protection().ready.load(std::memory_order_acquire) || !resolve(client, entity, owner)) return false;
+    result = {protection().base, entity, pointer(client, 8), owner.core, owner.context, owner.rig, owner.selector};
+    return result.world != 0;
+}
+bool local_bail_recovered(const LocalBailOwner& owner) noexcept {
+    LastError error;
+    const auto base=protection().base;
+    std::uint32_t state{},requests{};
+    if (owner.base!=base || pointer(owner.core)!=base+bail_core_vtable ||
+        pointer(owner.core,0x3c0)!=owner.context || pointer(owner.core,0x438)!=owner.rig ||
+        pointer(owner.rig)!=owner.context || pointer(owner.rig,0x4630)!=owner.core ||
+        !read(owner.context+0x1414,state) || state!=offboard_physics_state ||
+        !read(owner.context+animation_request_offset,requests) || (requests&animation_request_mask)) return false;
+    const auto parent=pointer(owner.core,0x3b0);
+    if (parent!=pointer(owner.core,0x3a8) ||
+        pointer(parent)!=base+addr::offboard_flight::offboard_flight_vtable ||
+        pointer(parent,8)!=owner.context || pointer(parent,0x18)!=owner.rig ||
+        pointer(parent,0x10)!=pointer(owner.core,0x430)) return false;
+    const auto active=pointer(parent,0x48);
+    for (const auto& substate:addr::offboard_flight::offboard_flight_states) {
+        if (substate.offset==0x5b0) continue; // gravity/air is not recovery
+        if (active==parent+substate.offset && pointer(active)==base+substate.vtable_rva) return true;
+    }
+    return false;
+}
 bool update_no_bail(std::uintptr_t client, std::uintptr_t entity, bool manual,
     bool flying, std::uint64_t flight_expires) noexcept {
     LastError error;

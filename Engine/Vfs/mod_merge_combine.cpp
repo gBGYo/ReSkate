@@ -571,6 +571,7 @@ fb::TocDocument combine(const fs::path& baseToc, const fs::path& baseRoot,
         // Assets another mod added to the game's copy of this bundle: this copy
         // loads instead of the game's on this mod's levels, so it gets them too.
         std::vector<Asset> additions;
+        std::vector<const AssetAddition*> addedChunkSources;
         if (propagate && casBacked) {
             std::vector<const AssetAddition*> take;
             std::set<const AssetAddition*> taking;
@@ -579,7 +580,7 @@ fb::TocDocument combine(const fs::path& baseToc, const fs::path& baseRoot,
             const auto here = lower(relative);
             if (const auto found = overrides.added.find(key); found != overrides.added.end())
                 for (const auto& addition : found->second) {
-                    if (addition.mod == modName || addition.asset.kind == fb::AssetKind::chunk ||
+                    if (addition.mod == modName ||
                         addition.toc == here) continue;
                     take.push_back(&addition);
                     taking.insert(&addition);
@@ -608,6 +609,7 @@ fb::TocDocument combine(const fs::path& baseToc, const fs::path& baseRoot,
                 std::set<std::string, std::less<>> present;
                 for (const auto& asset : casManifest.ebx) present.insert(asset_key(asset));
                 for (const auto& asset : casManifest.resources) present.insert(asset_key(asset));
+                for (const auto& asset : casManifest.chunks) present.insert(asset_key(asset));
                 const auto installChunk = region.files.front().location.installChunk;
                 for (const auto* addition : take) {
                     if (!present.insert(asset_key(addition->asset)).second) continue;
@@ -617,6 +619,7 @@ fb::TocDocument combine(const fs::path& baseToc, const fs::path& baseRoot,
                             placed = carriedAt.emplace(std::pair{installChunk, addition},
                                 store.write(installChunk, manifestArchive, addition->encoded)).first;
                         additions.push_back({addition->asset, placed->second});
+                        if (addition->asset.kind==fb::AssetKind::chunk) addedChunkSources.push_back(addition);
                         addedFrom.insert(addition->mod);
                     } catch (const std::exception& error) {
                         report.notes.push_back(modName + ": " + bundle.name + ": " + addition->asset.name +
@@ -652,8 +655,9 @@ fb::TocDocument combine(const fs::path& baseToc, const fs::path& baseRoot,
         // positions still hold.
         for (auto& addition : additions) {
             const auto ebx = addition.asset.kind == fb::AssetKind::ebx;
-            const auto at = static_cast<std::ptrdiff_t>(1 + casManifest.ebx.size() + (ebx ? 0 : casManifest.resources.size()));
-            (ebx ? casManifest.ebx : casManifest.resources).push_back(std::move(addition.asset));
+            const auto chunk = addition.asset.kind == fb::AssetKind::chunk;
+            const auto at = static_cast<std::ptrdiff_t>(1 + casManifest.ebx.size() + (ebx ? 0 : casManifest.resources.size()) + (chunk ? casManifest.chunks.size() : 0));
+            (ebx ? casManifest.ebx : chunk ? casManifest.chunks : casManifest.resources).push_back(std::move(addition.asset));
             region.files.insert(region.files.begin() + at, addition.file);
             inPatch.insert(inPatch.begin() + at, true);
             used.emplace(addition.file.location.installChunk, addition.file.location.archive);
@@ -730,6 +734,21 @@ fb::TocDocument combine(const fs::path& baseToc, const fs::path& baseRoot,
                 record.index = index;
                 if (isBase) record.shipped = index;
             }
+        }
+        // Added chunks have metadata in the declaring mod's bundle, rather
+        // than this map's original list. Keep that exact source record until
+        // the ordinary metadata merger writes the final sorted chunk list.
+        for (const auto* source:addedChunkSources) {
+            auto copy=ChunkRecord::none;
+            if (!source->chunkMetadata.empty()) {
+                auto list=std::find(state.metadata.begin(),state.metadata.end(),source->chunkMetadata);
+                if (list==state.metadata.end()) list=state.metadata.insert(state.metadata.end(),source->chunkMetadata);
+                copy=static_cast<std::size_t>(list-state.metadata.begin());
+            }
+            for (auto& entry:flat)
+                if (entry.asset.kind==fb::AssetKind::chunk && entry.asset.guid==source->asset.guid) {
+                    entry.record.copy=copy; entry.record.index=source->chunkIndex;
+                }
         }
         const std::size_t firstFile = casBacked ? 1 : 0;
         const auto* owner = isBase ? nullptr : &*owners.insert(modName).first;

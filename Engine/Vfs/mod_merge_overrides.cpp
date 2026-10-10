@@ -3,6 +3,7 @@
 #include "Engine/Resource/ebx_document.h"
 #include "Engine/Resource/ebx_merge.h"
 #include "Engine/Resource/ebx_writer.h"
+#include "Engine/Core/Json/json.h"
 
 #include <algorithm>
 #include <array>
@@ -28,6 +29,23 @@ AssetOverrides collect_asset_overrides(const std::vector<const Mod*>& mods,
         const auto files = modFiles.find(mod);
         if (files == modFiles.end()) continue;
         std::size_t changed{};
+        std::set<std::string,std::less<>> shared_bundles;
+        const auto declaration=mod->directory/"reskate-shared-bundles.json";
+        if (fs::is_regular_file(declaration)) try {
+            const auto bytes=read_file(declaration);
+            const auto doc=Json::parse(std::string_view(reinterpret_cast<const char*>(bytes.data()),bytes.size()),{64*1024,4,512});
+            if (!doc.is_object() || doc.value("schema",0)!=1 || !doc.contains("bundles") || !doc.at("bundles").is_array())
+                throw std::runtime_error("Expected schema 1 and a bundle array");
+            for (const auto& name:doc.at("bundles")) shared_bundles.insert(lower(name.get<std::string>()));
+        } catch (const std::exception& e) {
+            report.notes.push_back(mod->name+": shared bundle declaration ignored ("+e.what()+")");
+            shared_bundles.clear();
+        }
+        // Blood's compiled shaders have resource references that EBX imports
+        // cannot describe. Carry declared EBX/resource/chunk additions together into
+        // a map's copy of an existing stock bundle, as on feature/decals.
+        // Stock streaming chunks remain in the original game TOCs.
+        std::vector<std::pair<std::string,AssetAddition>> declared;
         // This mod's new assets, and the partitions its recorded changes import.
         // An added asset only follows a change that refers to it: copied on its
         // own, it could arrive in another mod's bundle without the resources
@@ -71,6 +89,24 @@ AssetOverrides collect_asset_overrides(const std::vector<const Mod*>& mods,
                     const auto modListing = list_bundle(store, mod->directory, baseRoot, bundle, gameRoot);
                     const auto gameListing = list_bundle(store, baseRoot, baseRoot, *shipped->second, gameRoot);
                     if (!modListing || !gameListing) continue;
+                    if (shared_bundles.contains(lower(bundle.name))) {
+                        std::size_t at=modListing->first;
+                        for (const auto kind:{fb::AssetKind::ebx,fb::AssetKind::resource,fb::AssetKind::chunk}) {
+                            const auto& assets=kind==fb::AssetKind::ebx?modListing->manifest.ebx:kind==fb::AssetKind::resource?modListing->manifest.resources:modListing->manifest.chunks;
+                            const auto& originals=kind==fb::AssetKind::ebx?gameListing->manifest.ebx:kind==fb::AssetKind::resource?gameListing->manifest.resources:gameListing->manifest.chunks;
+                            for (const auto& asset:assets) {
+                                const auto index=at++;
+                                if (index>=modListing->files.size() || std::ranges::any_of(originals,[&](const auto& original){return kind==fb::AssetKind::chunk?original.guid==asset.guid:lower(original.name)==lower(asset.name);})) continue;
+                                const auto& file=modListing->files[index];
+                                declared.push_back({lower(bundle.name),{mod->name,asset,
+                                    store.read(file.location.patch?mod->directory:baseRoot,file.location,file.offset,file.size),lower(relative)}});
+                                if (kind==fb::AssetKind::chunk) {
+                                    declared.back().second.chunkMetadata=modListing->manifest.chunkMetadata;
+                                    declared.back().second.chunkIndex=index-modListing->first-modListing->manifest.ebx.size()-modListing->manifest.resources.size();
+                                }
+                            }
+                        }
+                    }
                     // The game's copy of each asset: its sha1, and where in the listing it is.
                     std::map<std::string, std::pair<fb::Sha1, std::size_t>, std::less<>> original;
                     for (std::size_t index = 0; index < gameListing->manifest.ebx.size(); ++index) {
@@ -166,7 +202,7 @@ AssetOverrides collect_asset_overrides(const std::vector<const Mod*>& mods,
         const auto keep = [&](const std::string& bundle, AssetAddition addition) {
             auto& list = out.added[bundle];
             auto& index = addedAt[bundle];
-            const auto [place, fresh] = index.try_emplace({addition.asset.kind, lower(addition.asset.name)}, list.size());
+            const auto [place, fresh] = index.try_emplace({addition.asset.kind, addition.asset.kind == fb::AssetKind::chunk ? addition.asset.guid.string() : lower(addition.asset.name)}, list.size());
             if (!fresh) {
                 const auto holder = list.begin() + static_cast<std::ptrdiff_t>(place->second);
                 if (holder->mod != addition.mod && holder->asset.sha1 != addition.asset.sha1) {
@@ -180,6 +216,7 @@ AssetOverrides collect_asset_overrides(const std::vector<const Mod*>& mods,
             list.push_back(std::move(addition));
             return true;
         };
+        for (auto& [bundle,addition]:declared) keep(bundle,std::move(addition));
         // Transitively: an addition a following addition imports follows too (a new song
         // imports its new wave, and only the song is named by the changed playlist).
         std::vector<bool> followed(candidates.size());
@@ -276,13 +313,13 @@ AssetOverrides collect_asset_overrides(const std::vector<const Mod*>& mods,
             report.notes.push_back(mod->name + ": " + std::to_string(clash.first) +
                 " added asset(s) share a name with ones " + other + " adds, e.g. " + clash.second +
                 "; other mods' copies of the bundle get " + other + "'s");
-        // The new TOC chunks this mod's carried EBX name (as raw GUID bytes, the way an
-        // EBX stores a ChunkId), so they can follow those assets into other superbundles.
+        // New TOC chunks named by carried EBX or resource headers (raw GUID
+        // bytes), so private texture pixels follow assets into other superbundles.
         if (!newChunks.empty()) {
             std::vector<std::vector<std::byte>> carried;
             for (const auto& [bundle, list] : out.added)
                 for (const auto& addition : list)
-                    if (addition.mod == mod->name && addition.asset.kind == fb::AssetKind::ebx) try {
+                    if (addition.mod == mod->name && addition.asset.kind != fb::AssetKind::chunk) try {
                         carried.push_back(fb::decode_cas(addition.encoded, {gameRoot}));
                     } catch (const std::exception&) {}
             // Each carried asset is gone through once, for all the chunks together: looking for

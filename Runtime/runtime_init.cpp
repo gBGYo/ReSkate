@@ -1,3 +1,4 @@
+#include "Extension/Blood/blood_runtime.h"
 #include "runtime_internal.h"
 #include "bootstrap.h"
 #include "Engine/Core/Hooks/hooks.h"
@@ -420,6 +421,7 @@ extern "C" __declspec(dllexport) BOOL WINAPI DingoSDKDebugInitialize() {
         }
         r.native_loading_logging = dingosdk::start_level_loading_logging(r.base,
             [](std::uintptr_t base, unsigned next) noexcept {
+                dingosdk::blood::before_level_transition(next);
                 dingosdk::local_profile_before_level_transition(next);
                 dingosdk::multiplayer::native_menu_before_level_transition(base, next);
                 dingosdk::multiplayer::throwdown_lab_before_level_transition(next);

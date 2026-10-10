@@ -1,4 +1,5 @@
 #include "skate_menu_internal.h"
+#include "Extension/Blood/blood_runtime.h"
 
 #include <array>
 #include <cmath>
@@ -186,12 +187,57 @@ void movement_controls(SkateMenu& menu, const Model& model, const CallbacksV3& c
     end_card();
 }
 
+void blood_controls(SkateMenu& menu) {
+    const auto value=dingosdk::blood::snapshot();
+    auto options=value.options;
+    begin_card(menu,"blood","BLOOD");
+    bool changed=false;
+    ImGui::BeginDisabled(!value.ready);
+        if (toggle_row(menu,"Blood effects","Impact spray, moving droplets, and blood smears where injured body parts drag.",options.blood,value.ready)) changed=true;
+        ImGui::BeginDisabled(!options.blood);
+        field(menu,"Blood effect size"); ImGui::SetNextItemWidth(-FLT_MIN);
+        changed|=ImGui::SliderFloat("##blood-strength",&options.blood_strength,0.f,1.f,"%.2f",ImGuiSliderFlags_AlwaysClamp);
+        field(menu,"Blood damage threshold","Minimum damage from a single impact. Higher values require harder hits to start bleeding."); ImGui::SetNextItemWidth(-FLT_MIN);
+        changed|=ImGui::SliderFloat("##blood-min-damage",&options.blood_min_damage,0.f,3600.f,"%.0f",ImGuiSliderFlags_AlwaysClamp|ImGuiSliderFlags_Logarithmic);
+        auto& blood=options.blood_tuning;
+        field(menu,"Trail density","Higher values leave ground marks closer together."); ImGui::SetNextItemWidth(-FLT_MIN);
+        changed|=ImGui::SliderFloat("##blood-density",&blood.density,.25f,3.f,"%.2fx",ImGuiSliderFlags_AlwaysClamp);
+        field(menu,"Smear width"); ImGui::SetNextItemWidth(-FLT_MIN);
+        changed|=ImGui::SliderFloat("##blood-width",&blood.width,.25f,3.f,"%.2fx",ImGuiSliderFlags_AlwaysClamp);
+        field(menu,"Smear length"); ImGui::SetNextItemWidth(-FLT_MIN);
+        changed|=ImGui::SliderFloat("##blood-length",&blood.length,.25f,3.f,"%.2fx",ImGuiSliderFlags_AlwaysClamp);
+        field(menu,"Bleeding duration","Scales how long new injuries leave ground marks while bailing."); ImGui::SetNextItemWidth(-FLT_MIN);
+        changed|=ImGui::SliderFloat("##blood-bleeding",&blood.bleeding,.25f,5.f,"%.2fx",ImGuiSliderFlags_AlwaysClamp);
+        field(menu,"Mark lifetime","How long new ground marks remain. Older marks may fade sooner when the scene is full."); ImGui::SetNextItemWidth(-FLT_MIN);
+        changed|=ImGui::SliderFloat("##blood-lifetime",&blood.lifetime,10.f,300.f,"%.0f seconds",ImGuiSliderFlags_AlwaysClamp);
+        field(menu,"Blood color","Applies to spray, droplets and smears. Changing color clears existing blood."); ImGui::SetNextItemWidth(-FLT_MIN);
+        if (ImGui::BeginCombo("##blood-color",dingosdk::blood::blood_color_names[unsigned(blood.color)])) {
+            for (unsigned i=0;i<dingosdk::blood::blood_color_names.size();++i) {
+                const bool selected=unsigned(blood.color)==i;
+                if (ImGui::Selectable(dingosdk::blood::blood_color_names[i],selected) && !selected) {
+                    blood.color=static_cast<dingosdk::blood::BloodColor>(i); changed=true;
+                }
+                if (selected) ImGui::SetItemDefaultFocus();
+            }
+            ImGui::EndCombo();
+        }
+        if (ImGui::Button("Reset blood customization",ImVec2(-FLT_MIN,0))) {blood={}; changed=true;}
+        ImGui::EndDisabled();
+    if (ImGui::Button("Reset blood settings")) {options={}; changed=true;}
+    if (changed) (void)dingosdk::blood::set_options(options);
+    ImGui::EndDisabled();
+    note(value.status.c_str());
+    if (!value.save_status.empty()) note(value.save_status.c_str());
+    end_card();
+}
+
 void skater_page(SkateMenu& menu, const Model& model, const CallbacksV3& callbacks) {
-    category_tabs(menu, menu.skater_tab, {"CAMERA", "GAMEPLAY"}, "skater-tabs");
+    category_tabs(menu, menu.skater_tab, {"CAMERA", "GAMEPLAY", "BLOOD"}, "skater-tabs");
     ImGui::PushID(menu.skater_tab);
     ImGui::BeginChild("skater-tab", ImVec2(0, page_body_height(menu)));
     if (menu.skater_tab == 0) camera_controls(menu, model, callbacks);
-    else movement_controls(menu, model, callbacks);
+    else if (menu.skater_tab == 1) movement_controls(menu, model, callbacks);
+    else blood_controls(menu);
     ImGui::EndChild();
     ImGui::PopID();
 }

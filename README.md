@@ -21,6 +21,7 @@ the launcher, the runtime that loads into the game, and the dedicated server.
   - World: time of day, population, district levels, rotating parks.
   - The **Park Editor**: place, move and save objects with freecam, snapping and undo.
   - Skater options: first person, movement, boosts, noclip.
+  - **Blood** (off by default): impact spray, persistent trails and smears, with independent controls in Skater > Blood. Requires the [blood asset mod](Extension/Blood/README.md).
   - **Hall of Meat** (off by default): bail and see the bones you hurt, with a skate. 3 style Meat card.
   - Progression, controls, graphics and multiplayer settings.
 - **Mods.**

@@ -1,3 +1,4 @@
+#include "Extension/Blood/blood_runtime.h"
 #include "runtime_internal.h"
 #include "Extension/Customization/developer_hoodie.h"
 #include "Extension/Customization/developer_board.h"
@@ -1115,6 +1116,8 @@ void tick(std::uintptr_t client, std::uintptr_t update) {
             if (auto notice = dingosdk::multiplayer::take_leave_notice(); !notice.empty())
                 dingosdk::overlay::notify(dingosdk::overlay::NoticeLevel::warning, "Map not installed", std::move(notice));
         }
+        dingosdk::blood::tick(r.base,client,r.debug_model.skater_identity,
+            multiplayer_ready && game_type==1,r.debug_model.noclip,r.debug_model.park_editor,r.multiplayer_map);
         dingosdk::multiplayer::refresh_identity_lists();
         // The player's Discord status (discord_presence.h): where they skate and with whom,
         // looked at every couple of seconds.

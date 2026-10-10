@@ -246,6 +246,9 @@ struct AssetAddition {
     // guids of the documents it refers to in turn (a song names its wave).
     fb::Guid file;
     std::vector<fb::Guid> names;
+    // Declared private chunks retain their source record and residency data.
+    std::vector<std::byte> chunkMetadata;
+    std::size_t chunkIndex{};
 };
 struct AssetOverrides {
     // By lower-case asset name, then the game's sha1 the change replaces.

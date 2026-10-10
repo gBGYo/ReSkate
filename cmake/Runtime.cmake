@@ -112,6 +112,14 @@ add_library(dingosdk_runtime SHARED
     Extension/Skater/client_debug.cpp
     Extension/Skater/ai_skaters.cpp
     Extension/Skater/no_bail.cpp
+    Extension/Blood/impact_model.cpp
+    Extension/Blood/blood.cpp
+    Extension/Blood/blood_pool.cpp
+    Extension/Blood/blood_native.cpp
+    Extension/Blood/blood_ground.cpp
+    Extension/Blood/blood_ground_native.cpp
+    Extension/Blood/blood_options.cpp
+    Extension/Blood/blood_runtime.cpp
     Extension/Skater/physics_tuning.cpp
     Extension/Multiplayer/Remote/remote_collision.cpp
     Extension/Skater/physics_tuning_model.cpp
