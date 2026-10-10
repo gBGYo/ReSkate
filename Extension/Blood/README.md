@@ -29,3 +29,16 @@ Copy the contents of `artifacts/Blood/Patch` into the game's `Mods/ReSkate_Blood
 The existing No Bail hooks provide read-only local-owner validation, contact capture before skeleton response, and the resulting physics pose afterward. Client tick publishes immutable scenes to the native particle/decal APIs. Level transitions invalidate the generation before scene teardown. The existing Hall of Meat implementation on `main` is unchanged; no Slam challenge, X-ray, sound, camera, replay-export, or manual-bail implementation is imported.
 
 In-game verification: enable blood, fall and slide on a flat surface, compare low/high damage and smear settings, switch each color, and confirm wall/vehicle attachment. Disable/re-enable, recover and bail again, teleport, reload a map, open the replay/park editor, and use Noclip to check cleanup and rearming. Automated model tests cannot verify final rendered appearance.
+
+## Redistributable ZIP
+
+Build the branded runtime and launcher with binary auto-updates disabled, then package the compiled assets:
+
+```powershell
+cmake --preset vs2022-x64 '-DDINGOSDK_VERSION=1.0.0-blood' '-DDINGOSDK_LAUNCHER_AUTO_UPDATE=OFF'
+cmake --build build/vs2022-x64 --config Release --target dingosdk_runtime dingosdk_launcher --parallel 4
+python contrib/pack-blood.py
+./contrib/test-blood-package.ps1
+```
+
+The output is `artifacts/ReSkate_Blood-1.0.0.zip` plus its SHA-256 sidecar. Commit source changes before packaging: `Source.zip` contains the exact Git revision recorded in `build-info.json`. The package imports through the launcher; its `Install.bat` then activates the required custom runtime with a verified backup. Users must run `Uninstall.bat` before removing or updating the package.

@@ -1,0 +1,6 @@
+Import ZIP with ReSkateLauncher > Mods. Enable it. Close launcher and game.
+Open the installed mod folder and run Install.bat.
+Start ReSkateLauncher, open Skater > Blood, enable Blood effects.
+
+Before removing or updating the mod, close game and launcher and run Uninstall.bat.
+Keep the backup folder until uninstall completes. See README.md for details.

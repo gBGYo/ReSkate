@@ -79,7 +79,7 @@ template<class F> std::string error_of(F&& run) {
 
 } // namespace
 
-int main() {
+int main(int argc, char** argv) {
     wchar_t temp[MAX_PATH]{};
     GetTempPathW(MAX_PATH, temp);
     const auto root = fs::path(temp) / (L"reskate-mod-manager-tests-" + std::to_wstring(GetCurrentProcessId()));
@@ -322,6 +322,13 @@ int main() {
         check(install(store, sources / L"empty.zip") == "empty", "A plain install still takes a description-only mod");
     }
 
+    if (argc > 1) {
+        const auto imported = install(mods, fs::path(argv[1]));
+        check(fs::is_regular_file(mods / imported / "layout.toc"), "Release ZIP imports its game content");
+        check(fs::is_regular_file(mods / imported / "manifest.json"), "Release ZIP imports its metadata");
+        check(fs::is_regular_file(mods / imported / "reskate-shared-bundles.json"), "Release ZIP preserves shared bundles");
+        std::cout << "Release archive installed as " << imported << "\n";
+    }
     std::error_code ignored;
     fs::remove_all(root, ignored);
     if (failures) {
