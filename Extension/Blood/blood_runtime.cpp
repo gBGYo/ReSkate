@@ -3,6 +3,7 @@
 #include "Extension/Skater/no_bail.h"
 #include "Extension/Profile/local_profile_runtime.h"
 #include "Engine/Core/Platform/memory.h"
+#include "Engine/Core/Log/logging.h"
 #include "Engine/Game/Build/20260929/blood_contacts.h"
 #include "Engine/Game/Build/20260929/replay_activity.h"
 #include "Engine/Game/Build/20260929/client_source_spawn.h"
@@ -29,7 +30,9 @@ struct State {
     Snapshot published;
     bool contracts_checked{},contracts_ok{},bail_latched{};
     std::uint64_t last_at{},save_at{};
-    std::string map;
+    std::uint64_t diagnostic_at{},samples{},impact_count{};
+    unsigned contact_count{};
+    std::string map, sample_issue;
 };
 State& state() {static auto* s=new State; return *s;}
 template<class T> bool read(std::uintptr_t address, T& value) { return memory::peek(address, value); }
@@ -177,6 +180,8 @@ bool capture(const LocalBailOwner& owner, float dt, bool bailed, const PhysicsCo
 void reset(State& s) {
     s.watch={}; s.rig=0; s.selector=0; s.bail_latched=false;
     s.last_at=0; s.blood.clear(); s.impacts.reset();
+    s.samples=s.impact_count=0; s.contact_count=0;
+    s.sample_issue.clear();
 }
 }
 Snapshot snapshot() {auto& s=state(); std::lock_guard lock(s.mutex); return s.published;}
@@ -190,11 +195,11 @@ bool set_options(const Options& options) noexcept {
         return true;
     } catch (...) {return false;}
 }
-void tick(std::uintptr_t base,std::uintptr_t client,std::uintptr_t entity,bool ready,bool noclip,bool editor,std::string_view map) noexcept {
+void tick(std::uintptr_t base,std::uintptr_t client,bool ready,bool noclip,bool editor,std::string_view map) noexcept {
     try {
         auto& s=state();
         LocalBailOwner owner;
-        const bool owned=ready && resolve_local_bail_owner(client,entity,owner);
+        const bool owned=ready && resolve_local_bail_owner(client,owner);
         const bool replaying=replay_mode(base);
         std::unique_lock lock(s.mutex);
         if (!s.contracts_checked && no_bail_available()) {s.contracts_ok=contracts(base); s.contracts_checked=true;}
@@ -236,7 +241,16 @@ void tick(std::uintptr_t base,std::uintptr_t client,std::uintptr_t entity,bool r
         lock.lock();
         s.published.available=!issue && status.available;
         s.published.sources=status.active; s.published.marks=status.marks;
-        s.published.status=issue ? issue : !enabled ? "Blood effects are off." : std::string(status.detail);
+        s.published.status=issue ? issue : !enabled ? "Blood effects are off." :
+            !status.available ? std::string(status.detail) : !s.sample_issue.empty() ? s.sample_issue :
+            !particles_allowed ? "Waiting for local skater physics updates." : std::string(status.detail);
+        if (enabled && GetTickCount64()>=s.diagnostic_at) {
+            s.diagnostic_at=GetTickCount64()+5000;
+            logging::log(logging::Level::info,logging::Channel::skater,
+                "Blood: {}; local {:x}, samples {}, bailed {}, contacts {}, impacts {}, accepted {}, particles {}, marks {}.",
+                s.published.status,owned ? owner.entity : 0,s.samples,s.bail_latched,s.contact_count,
+                s.impact_count,s.blood.scene().accepted,status.active,status.marks);
+        }
     } catch (...) {stop_native_blood();}
 }
 void before_level_transition(unsigned next) noexcept {
@@ -300,9 +314,13 @@ void observe_skeleton(std::uintptr_t rig,float seconds,bool wipeout,const Physic
         if (!wipeout && ((selected>=100 && selected<300) || (selected>=400 && selected<500) || local_bail_recovered(current))) s.bail_latched=false;
         Frame frame; SampleStatus sample;
         capture(current,seconds,s.bail_latched,contacts,frame,sample);
-        if (frame.valid) s.last_at=GetTickCount64();
+        s.sample_issue=frame.valid ? std::string{} : sample.availability.empty() ?
+            "Local skater physics sample could not be validated." : sample.availability;
+        s.contact_count=sample.contacts;
+        if (frame.valid) {s.last_at=GetTickCount64(); ++s.samples;}
         if (!s.impacts.running() && frame.valid && !frame.bailed) s.impacts.begin(frame);
         else s.impacts.step(frame);
+        s.impact_count+=s.impacts.impact_contacts().size();
         const auto& options=s.published.options;
         s.blood.step(frame,s.impacts.impact_contacts(),
             {options.blood,false,options.blood_strength,options.blood_min_damage,options.blood_tuning},s.level_generation.load());

@@ -9,6 +9,8 @@ struct LocalBailOwner {
     bool operator==(const LocalBailOwner&) const = default;
 };
 bool resolve_local_bail_owner(std::uintptr_t client, std::uintptr_t entity, LocalBailOwner& result) noexcept;
+// Resolve the current local player directly, independently of debug UI polling.
+bool resolve_local_bail_owner(std::uintptr_t client, LocalBailOwner& result) noexcept;
 // Walking recovery is a verified ground/slide substate of the owned Offboard
 // parent, with no outstanding native wipeout animation request.
 bool local_bail_recovered(const LocalBailOwner& owner) noexcept;

@@ -21,7 +21,10 @@ namespace {
 constexpr auto donor_bundle="win32/effects/gestures/effectblueprints/ebp_gesture_applause_bundle";
 constexpr auto donor_graph="effects/_global/emittergraphs/eg_commonemitter_01";
 constexpr auto donor_effect="effects/gestures/effectblueprints/ebp_gesture_applause";
-constexpr auto target="win32/levels/game/bam_levelroot/bam_coregameassets";
+// BAM_CoreGameAssets is unloaded on travel to stadiums, Grom and other maps.
+// Keep the complete blood dependency set in the common level root, alongside
+// the shader lookup tables it uses, so host-map travel cannot strand it.
+constexpr auto target="win32/levels/game/dingolevel_root/dingolevel_root";
 constexpr std::uint64_t stock_material=7655350407671934533ULL;
 constexpr std::uint64_t blood_material=0x5ba7a219be420019ULL;
 template<class T> T get(const std::vector<std::byte>& b,std::size_t p) {
@@ -140,7 +143,36 @@ int main(int argc,char** argv) {
             Json problems=Json::object(); for (const auto& [name,list]:report.problems) problems[name]=list;
             std::ofstream(catalog.root/"report.json")<<Json{{"built",report.built},{"issue",report.issue},{"problems",problems},{"notes",report.notes}}.dump(2);
             if (!report.built || !report.issue.empty() || !report.problems.empty()) throw std::runtime_error("Blood/map merge failed; see .blood-merge-verification/report.json");
-            std::cout<<"Blood package merged with installed mods without conflicts.\n"; return 0;
+            // A conflict-free merge is insufficient: a city-only bundle passes
+            // that check but disappears when multiplayer selects a stadium.
+            const auto merged=catalog.root/dingosdk::mods::generated_folder;
+            const auto root_toc=merged/"Win32/levels/game/dingolevel_root/dingolevel_root.toc";
+            std::ifstream input(root_toc,std::ios::binary|std::ios::ate);
+            if (!input) throw std::runtime_error("Merged blood package has no common level root TOC");
+            std::vector<std::byte> bytes(static_cast<std::size_t>(input.tellg()));
+            input.seekg(0); input.read(reinterpret_cast<char*>(bytes.data()),bytes.size());
+            if (!input) throw std::runtime_error("Could not read merged common level root TOC");
+            const auto toc=fb::read_toc(bytes);
+            const auto root=std::find_if(toc.bundles.begin(),toc.bundles.end(),[](const auto& b){return b.name==target;});
+            if (root==toc.bundles.end()) throw std::runtime_error("Merged blood package has no common level root bundle");
+            const auto region=fb::read_bundle_region(root->region);
+            if (region.files.empty()) throw std::runtime_error("Merged common level root has no manifest");
+            const auto layout=dingosdk::vfs::read_layout(merged/"layout.toc");
+            dingosdk::vfs::GameArchives archives(merged,layout.root);
+            const auto& file=region.files.front();
+            const auto manifest=archives.read_manifest(merged,file.location,file.offset,file.size,catalog.data_root);
+            const auto require_asset=[&](const std::string& name) {
+                if (std::none_of(manifest.ebx.begin(),manifest.ebx.end(),[&](const auto& a){return a.name==name;}))
+                    throw std::runtime_error("Blood asset missing from the common level root: "+name);
+            };
+            for (unsigned color=0;color<dingosdk::blood::blood_color_names.size();++color) {
+                const auto selected=static_cast<dingosdk::blood::BloodColor>(color);
+                for (const auto* name:dingosdk::blood::blood_asset_names)
+                    require_asset(dingosdk::blood::blood_colored_asset(name,selected));
+                for (const auto* name:dingosdk::blood::blood_ground_materials)
+                    require_asset(dingosdk::blood::blood_colored_asset(name,selected));
+            }
+            std::cout<<"Blood package merged without conflicts; all 36 effects and 16 materials are in the common level root.\n"; return 0;
         }
         if (argc!=3) throw std::runtime_error("usage: blood_asset_author <supported Skate folder> <output folder>");
         dingosdk::vfs::GameData data(argv[1]);

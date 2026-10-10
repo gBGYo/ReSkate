@@ -364,6 +364,21 @@ bool start_no_bail(std::uintptr_t base) noexcept {
     return false;
 }
 bool no_bail_available() noexcept { return protection().ready.load(std::memory_order_acquire); }
+bool resolve_local_bail_owner(std::uintptr_t client, LocalBailOwner& result) noexcept {
+    LastError error;
+    if (!protection().ready.load(std::memory_order_acquire)) return false;
+    const auto base=protection().base;
+    unsigned offset{};
+    if (pointer(client)!=base+addr::engine::client_vtable ||
+        !read(base+addr::engine::context_player_manager_offset,offset) || offset>0x1000000) return false;
+    const auto manager=pointer(pointer(client,8),offset);
+    const auto begin=pointer(manager,0x4c8);
+    if (pointer(manager)!=base+addr::engine::local_player_manager_vtable ||
+        !begin || pointer(manager,0x4d0)!=begin+8) return false;
+    // The strict resolver rechecks the local/remote flags, entity ownership,
+    // teleport state and every rig back-link before any blood can be emitted.
+    return resolve_local_bail_owner(client,pointer(pointer(begin),0xb8),result);
+}
 bool resolve_local_bail_owner(std::uintptr_t client, std::uintptr_t entity, LocalBailOwner& result) noexcept {
     LastError error;
     Owner owner;

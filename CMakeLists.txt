@@ -297,6 +297,13 @@ if(DINGOSDK_BUILD_BLOOD_TESTS)
         Extension/Blood/impact_model.cpp Extension/Blood/blood_options.cpp)
     target_link_libraries(dingosdk_blood_tests PRIVATE dingosdk_json)
     add_test(NAME blood COMMAND dingosdk_blood_tests)
+    if(WIN32)
+        add_executable(dingosdk_blood_runtime_tests Extension/Blood/Test/blood_runtime_tests.cpp
+            Extension/Blood/blood_runtime.cpp Extension/Blood/blood.cpp Extension/Blood/blood_ground.cpp
+            Extension/Blood/impact_model.cpp Extension/Blood/blood_options.cpp)
+        target_link_libraries(dingosdk_blood_runtime_tests PRIVATE dingosdk_json dingosdk_logging)
+        add_test(NAME blood_runtime COMMAND dingosdk_blood_runtime_tests)
+    endif()
     add_executable(dingosdk_blood_asset_author EXCLUDE_FROM_ALL Extension/Blood/Tools/blood_asset_author.cpp)
     target_link_libraries(dingosdk_blood_asset_author PRIVATE dingosdk_game_archives dingosdk_json dingosdk_mods)
 endif()
