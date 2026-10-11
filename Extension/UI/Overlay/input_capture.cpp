@@ -80,9 +80,16 @@ BOOLEAN __stdcall captured_hid_attributes(HANDLE file, PHIDD_ATTRIBUTES attribut
 void neutral_hid(const InputCaptureHooks::HidRead& read, DWORD size) {
     if (!block_polled_input() || !read.buffer || size > read.capacity) return;
     auto* bytes = static_cast<std::uint8_t*>(read.buffer);
-    if (!parse_playstation_report(read.kind, playstation_bluetooth(read.capacity), bytes, size)) return;
+    // USB or Bluetooth decides where the buttons are in a report with id 1. It is the device's
+    // report length that tells them apart, and Windows pads every read to that length, so it
+    // is how many bytes were read: not how large a buffer the game happens to read into. A
+    // game reading a USB DualSense into a larger buffer had its d-pad byte written as "up"
+    // here, and placed a session marker whenever a menu took the input. (Nothing is asked of
+    // the game's handle for this: 2.0.4 did, as the pad was first read.)
+    const bool bluetooth = playstation_bluetooth(size);
+    if (!parse_playstation_report(read.kind, bluetooth, bytes, size)) return;
     const bool sense_full = read.kind == PlayStationPad::dualsense &&
-        (bytes[0] == 0x31 || (bytes[0] == 1 && !playstation_bluetooth(read.capacity)));
+        (bytes[0] == 0x31 || (bytes[0] == 1 && !bluetooth));
     const unsigned offset = bytes[0] == 0x31 ? 2 : bytes[0] == 0x11 ? 3 : 1;
     auto* data = bytes + offset;
     std::fill_n(data, 4, std::uint8_t{128});
@@ -107,8 +114,10 @@ void neutral_hid(const InputCaptureHooks::HidRead& read, DWORD size) {
         std::memcpy(bytes + size - 4, &crc, sizeof(crc));
     }
     static std::atomic<bool> reported{};
-    if (!reported.exchange(true)) logging::write(logging::Level::info, logging::Channel::input,
-        "Native PlayStation HID report neutralized; overlay retains its independent input stream.");
+    if (!reported.exchange(true)) logging::printf(logging::Level::info, logging::Channel::input,
+        "Native PlayStation HID report neutralized; overlay retains its independent input stream. (%s over %s, report 0x%02x of %lu bytes, "
+        "the game's buffer %lu.)", read.kind == PlayStationPad::dualsense ? "DualSense" : "DualShock 4",
+        bluetooth ? "Bluetooth" : "USB", bytes[0], size, read.capacity);
 }
 void complete_hid(OVERLAPPED* request, DWORD bytes, bool success, bool finished) {
     auto& h = input_hooks();

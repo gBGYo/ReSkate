@@ -224,10 +224,13 @@ Hit item(Ui &ui, std::uint32_t id, ImVec2 a, ImVec2 b, const Item *clip = nullpt
     h.items.push_back({id, a, b, clip ? clip->id : 0});
     if (clip && h.focus == id) h.list_focus[clip->id] = id;
     Hit hit;
-    hit.hover = ui.input && inside(ui.mouse, a, b) && (!clip || inside(ui.mouse, clip->a, clip->b));
-    if (hit.hover && ui.moved && !h.typing) h.focus = id, h.ring = false;
+    const bool over = ui.input && inside(ui.mouse, a, b) && (!clip || inside(ui.mouse, clip->a, clip->b));
+    if (over && ui.moved && !h.typing) h.focus = id, h.ring = false;
+    // Lit by the pointer only while the pointer is in charge: once the D-pad or the keys have
+    // the focus, what the mouse was left resting on is not lit beside it. A click there still counts.
+    hit.hover = over && !h.ring;
     hit.focus = h.focus == id && (h.ring || hit.hover);
-    hit.press = ui.input && ((hit.hover && ui.clicked) || h.fire == id);
+    hit.press = ui.input && ((over && ui.clicked) || h.fire == id);
     if (hit.press) h.focus = id, h.sound = sound_select;
     return hit;
 }
@@ -1345,6 +1348,11 @@ bool hub_page_pending() {
             set_typing(h, 0);
             wipe(h.password), wipe(h.code_password), wipe(h.host_password);
             h.notice.clear();
+        } else {
+            // What is held as the page comes up is not a press on it: the Back that closed the
+            // game's side menu over it would dismiss the page as well.
+            h.keys_before.fill(true);
+            h.pad_before = ~0U;
         }
     }
     // With the overlay's own menu or console open the page stays where it is, behind them, and
